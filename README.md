@@ -84,6 +84,8 @@ unpaid well past its expiry (`overdue`).
 
 ## Quick start
 
+A longer walkthrough with expected output and troubleshooting is in [docs/GETTING-STARTED.md](docs/GETTING-STARTED.md).
+
 **Prerequisites:** Node 20.18.3+, Yarn, [Foundry](https://book.getfoundry.sh/getting-started/installation),
 and [Rust](https://rustup.rs) (only for the indexer).
 
