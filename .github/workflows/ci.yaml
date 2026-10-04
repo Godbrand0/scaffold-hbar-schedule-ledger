@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20.18.3
+          cache: yarn
+
+      - name: Setup Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: packages/indexer
+
+      - name: Install dependencies
+        run: yarn install --immutable
+
+      - name: Lint (eslint, forge fmt, cargo fmt and clippy)
+        run: yarn lint
+
+      - name: Type-check frontend
+        run: yarn next:check-types
+
+      - name: Test (forge, vitest, cargo)
+        run: yarn test
+
+      - name: Build frontend
+        run: yarn next:build
