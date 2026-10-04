@@ -200,9 +200,28 @@ not have found them.
 - **The mirror node has no server-side `scheduled` filter**, so the indexer finds executions through each
   schedule's `executed_timestamp`.
 
+## Testnet proof
+
+Deployed to Hedera testnet with `yarn foundry:deploy:testnet`; contract
+[`0.0.10861866`](https://hashscan.io/testnet/contract/0.0.10861866) (`0xFD70C4780318495fa11Ac6337c8125F041f6f302`). Everything below was
+indexed live by `packages/indexer` while it ran.
+
+| Scenario | What happened | Transactions |
+| --- | --- | --- |
+| **Chained runs, no keeper** (plan 1: 2 runs, 60 s apart) | Run 1 fired through HSS, paid the recipient and booked run 2 inside the same execution. Run 2 fired, paid and completed the plan. Both schedules ended `executed / SUCCESS`. | create [0xc8410ea2…](https://hashscan.io/testnet/transaction/0xc8410ea22c818f0cd47fc5a05b086942e52f4d778c480181fa8ad8c6d82a6ea1) · run 1 [0x8f162b67…](https://hashscan.io/testnet/transaction/0x8f162b6701b64e5fce5d3d173f5c5cba765d31216f518ca4b5c74204d6eebecc) ([0.0.10861887](https://hashscan.io/testnet/schedule/0.0.10861887)) · run 2 [0x586d5c96…](https://hashscan.io/testnet/transaction/0x586d5c964df8aba49a2f59d991343d13ca854d37e99c9e4af54b1836d3342d61) ([0.0.10861895](https://hashscan.io/testnet/schedule/0.0.10861895)) |
+| **Failure and recovery** (plan 2: recipient contract rejects funds) | The run fired and the contract emitted `PaymentFailed` instead of reverting. The plan paused and the indexer flagged `needsAttention` ("recipient rejected payment for run 1"). After the recipient accepted funds, `resume` re-booked the run, which paid exactly 0.1 HBAR and completed the plan. | create [0x730f01a4…](https://hashscan.io/testnet/transaction/0x730f01a469d7640fb3bde5ccb9177772672da13e2b415befd624122339b06245) · failed run [0x35cab11a…](https://hashscan.io/testnet/transaction/0x35cab11a53b2064770e322c4ecf2ed4c52b2679843994743e2d07cf95f79fd21) ([0.0.10861911](https://hashscan.io/testnet/schedule/0.0.10861911)) · resume [0xf3e11e3f…](https://hashscan.io/testnet/transaction/0xf3e11e3f57288ea716d7f2435856d577e26ad310b75c0d83ed9e2c9308cd8cd2) · paid run [0xde10243b…](https://hashscan.io/testnet/transaction/0xde10243bb68a926299c1d0c8bb2ebbb93bba43f979ce2adbad09f04a1bf376e8) ([0.0.10861929](https://hashscan.io/testnet/schedule/0.0.10861929)) |
+| **Cancel** (plan 3: first run one hour away) | `cancel` deleted the pending schedule (indexer status `deleted`) and refunded the full 3.6 HBAR escrow. | create [0x24108aab…](https://hashscan.io/testnet/transaction/0x24108aabbcf2f6a8f80c8207c933de03dcf950538281e33b6445b674fa2dbee3) · cancel [0xcd3fcb79…](https://hashscan.io/testnet/transaction/0xcd3fcb79f46e8eae4c31cb2aa7a11984375e23309fac4d01de133e1469845ca6) ([0.0.10861936](https://hashscan.io/testnet/schedule/0.0.10861936)) |
+
+Deployment transaction: [0xce5c8093…](https://hashscan.io/testnet/transaction/0xce5c8093a89afe35608fed0cde60ed04a5d249f7c20bfc57410d8b98ccd28342). The recipient contract for
+plan 2 (`RejectingReceiver`, a test mock) is [`0.0.10861909`](https://hashscan.io/testnet/contract/0.0.10861909).
+
+Earlier runs against previous builds of this contract are what exposed the findings in
+[Hedera details worth knowing](#hedera-details-worth-knowing): an `INSUFFICIENT_PAYER_BALANCE` failure and a
+`CONTRACT_REVERT_EXECUTED` (`NotDue`) failure, both detected by the indexer from the mirror node alone.
+
 ## Status and limitations
 
-- **Testnet proof:** pending the final deployment of the current contract. Links will be added here.
+- **Testnet proof:** see the section above.
 - Verified on the live testnet: the mirror node response shapes (live tests), contract booking through HIP-1215,
   scheduled execution, the tinybar `msg.value` behaviour, and the indexer detecting two real on-chain failures
   (`INSUFFICIENT_PAYER_BALANCE` and `CONTRACT_REVERT_EXECUTED`) that the contract itself could not report.
