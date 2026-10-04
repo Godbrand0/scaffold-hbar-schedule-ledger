@@ -223,7 +223,9 @@ contract RecurringPaymentsTest is Test {
         vm.prank(owner);
         ledger.cancel(id);
         skip(INTERVAL + 10);
-        vm.expectRevert(abi.encodeWithSelector(RecurringPayments.WrongStatus.selector, RecurringPayments.Status.Cancelled));
+        vm.expectRevert(
+            abi.encodeWithSelector(RecurringPayments.WrongStatus.selector, RecurringPayments.Status.Cancelled)
+        );
         ledger.executeRun(id);
     }
 
@@ -325,7 +327,9 @@ contract RecurringPaymentsTest is Test {
 
         vm.startPrank(owner);
         ledger.cancel(id);
-        vm.expectRevert(abi.encodeWithSelector(RecurringPayments.WrongStatus.selector, RecurringPayments.Status.Cancelled));
+        vm.expectRevert(
+            abi.encodeWithSelector(RecurringPayments.WrongStatus.selector, RecurringPayments.Status.Cancelled)
+        );
         ledger.cancel(id);
         vm.stopPrank();
     }
@@ -365,7 +369,11 @@ contract RefundRejector {
         ledger = ledger_;
     }
 
-    function create(address payable to, uint256 amount, uint32 interval, uint32 runs) external payable returns (uint256) {
+    function create(address payable to, uint256 amount, uint32 interval, uint32 runs)
+        external
+        payable
+        returns (uint256)
+    {
         return ledger.createPlan{ value: amount * runs }(to, amount, interval, runs);
     }
 

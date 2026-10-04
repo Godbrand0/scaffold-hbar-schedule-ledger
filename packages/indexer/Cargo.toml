@@ -23,3 +23,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 [dev-dependencies]
 http-body-util = "0.1"
 tower = { version = "0.5", features = ["util"] }
+
+[profile.dev]
+# Line tables keep backtraces useful while cutting build output to a fraction of full debuginfo.
+debug = "line-tables-only"

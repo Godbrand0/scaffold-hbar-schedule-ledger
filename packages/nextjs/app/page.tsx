@@ -1,162 +1,99 @@
 "use client";
 
-import Image from "next/image";
-import Link from "next/link";
-import { HederaPortalFaucet } from "@scaffold-hbar-ui/components";
+import { useQuery } from "@tanstack/react-query";
 import type { NextPage } from "next";
+import { zeroAddress } from "viem";
 import { useAccount } from "wagmi";
-import { BugAntIcon, MagnifyingGlassIcon } from "@heroicons/react/24/outline";
-import { HederaAddress } from "~~/components/scaffold-hbar";
-import { useTargetNetwork } from "~~/hooks/scaffold-hbar";
+import { CreatePlanCard } from "~~/components/schedule-ledger/CreatePlanCard";
+import { PlanCard } from "~~/components/schedule-ledger/PlanCard";
+import { useDeployedContractInfo } from "~~/hooks/scaffold-hbar";
+import { INDEXER_URL, fetchHealth, fetchPlans } from "~~/utils/schedule-ledger/indexer";
+
+const REFRESH_MS = 5_000;
+const STALE_AFTER_SECONDS = 60;
+
+const SetupSteps = ({ deployed, indexerUp }: { deployed: boolean; indexerUp: boolean }) => (
+  <div className="card bg-base-100 shadow-md">
+    <div className="card-body">
+      <h2 className="card-title">Setup</h2>
+      <ol className="m-0 space-y-2 pl-5 text-sm">
+        <li className={deployed ? "line-through opacity-60" : ""}>
+          Deploy the contract: <code>yarn foundry:deploy:testnet</code>
+        </li>
+        <li className={indexerUp ? "line-through opacity-60" : ""}>
+          Put the deployed address in <code>packages/indexer/.env</code> as <code>CONTRACT_ADDRESS</code>, then run{" "}
+          <code>yarn indexer:start</code> (API at {INDEXER_URL})
+        </li>
+      </ol>
+    </div>
+  </div>
+);
 
 const Home: NextPage = () => {
-  const { address: connectedAddress, status } = useAccount();
-  const { targetNetwork } = useTargetNetwork();
+  const { address, isConnected } = useAccount();
+  const { data: contract, isLoading: contractLoading } = useDeployedContractInfo({ contractName: "RecurringPayments" });
+  const deployed = !!contract && contract.address !== zeroAddress;
 
-  const isReconnecting = status === "reconnecting" || status === "connecting";
-  const isConnected = status === "connected" && connectedAddress;
+  const plans = useQuery({ queryKey: ["plans"], queryFn: fetchPlans, refetchInterval: REFRESH_MS, retry: false });
+  const health = useQuery({ queryKey: ["health"], queryFn: fetchHealth, refetchInterval: REFRESH_MS, retry: false });
+  const indexerUp = !plans.isError && !!plans.data;
+  const refresh = () => {
+    void plans.refetch();
+    void health.refetch();
+  };
+
+  const stale = (health.data?.secondsSinceSync ?? 0) > STALE_AFTER_SECONDS;
+  const attentionCount = plans.data?.filter(p => p.needsAttention).length ?? 0;
 
   return (
-    <>
-      <div className="flex items-center flex-col grow">
-        <div className="hedera-gradient dark:bg-none dark:bg-hedera-charcoal w-full py-16 px-5">
-          <div className="flex flex-col items-center max-w-2xl mx-auto">
-            <Image
-              src="/Hedera-Icon-White.svg"
-              alt="Hedera icon"
-              width={80}
-              height={80}
-              className="mb-6 hidden dark:block"
-            />
-            <Image src="/Hedera-Icon-Dark.svg" alt="Hedera icon" width={80} height={80} className="mb-6 dark:hidden" />
-            <div className="flex flex-col items-center gap-1 mb-4">
-              <span className="block text-lg font-medium tracking-widest uppercase text-white/80 dark:text-white/60">
-                Built on Hedera
-              </span>
-              <span className="block text-lg font-medium tracking-widest uppercase text-white/80 dark:text-white/60">
-                For
-              </span>
-              <Image
-                src="/Hedera-Wordmark-Lockup-White.svg"
-                alt="Hedera"
-                width={240}
-                height={48}
-                className="mt-1 hidden dark:block"
-              />
-              <Image
-                src="/Hedera-Wordmark-Lockup-Dark.svg"
-                alt="Hedera"
-                width={240}
-                height={48}
-                className="mt-1 dark:hidden"
-              />
-            </div>
-          </div>
+    <div className="mx-auto flex w-full max-w-4xl flex-col gap-6 px-5 py-8">
+      <header>
+        <h1 className="m-0 text-3xl font-bold">Schedule Ledger</h1>
+        <p className="mt-2 text-base-content/70">
+          Escrowed HBAR payments that pay themselves through the Hedera Schedule Service. The Rust indexer shows what
+          happened to every run, including the ones that failed.
+        </p>
+      </header>
+
+      {!contractLoading && (!deployed || !indexerUp) && <SetupSteps deployed={deployed} indexerUp={indexerUp} />}
+
+      {plans.isError && (
+        <div role="alert" className="alert alert-error text-sm">
+          Cannot reach the indexer at {INDEXER_URL}. Is <code>yarn indexer:start</code> running?
         </div>
-
-        <div className="w-full max-w-4xl mx-auto px-5 -mt-8">
-          <div className="bg-base-100 rounded-2xl shadow-lg p-8">
-            {isReconnecting ? (
-              <div className="flex flex-col items-center gap-2">
-                <p className="font-semibold text-sm text-base-content/60 uppercase tracking-wider m-0">Connecting…</p>
-                <div className="h-8 w-48 rounded bg-base-200 animate-pulse" aria-hidden />
-              </div>
-            ) : isConnected ? (
-              <div className="flex flex-col items-center gap-2">
-                <p className="font-semibold text-sm text-base-content/60 uppercase tracking-wider m-0">
-                  Connected Address
-                </p>
-                <HederaAddress address={connectedAddress} chain={targetNetwork} />
-              </div>
-            ) : (
-              <div className="flex flex-col items-center gap-2">
-                <p className="font-semibold text-sm text-base-content/60 uppercase tracking-wider m-0">
-                  Connect your wallet to get started
-                </p>
-              </div>
-            )}
-          </div>
+      )}
+      {indexerUp && (stale || health.data?.lastError) && (
+        <div role="alert" className="alert alert-warning text-sm">
+          The indexer is behind the network
+          {health.data?.lastError
+            ? `: ${health.data.lastError}`
+            : ` (last synced ${health.data?.secondsSinceSync}s ago)`}
+          . Data below may be out of date.
         </div>
-
-        <div className="w-full max-w-4xl mx-auto px-5 mt-8 pb-16">
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-            <div className="bg-base-100 rounded-2xl shadow-md p-8 text-center flex flex-col items-center hover:shadow-lg transition-shadow border border-base-300">
-              <div className="w-14 h-14 rounded-full hedera-gradient flex items-center justify-center mb-4">
-                <BugAntIcon className="h-7 w-7 text-white" />
-              </div>
-              <h3 className="font-bold text-lg mb-2">Debug Contracts</h3>
-              <p className="text-base-content/70 text-sm m-0 mb-6">
-                Tinker with your smart contracts and test interactions in real time.
-              </p>
-              <Link href="/debug" passHref className="btn btn-primary btn-sm">
-                Open Debug
-              </Link>
-            </div>
-
-            <div className="bg-base-100 rounded-2xl shadow-md p-8 text-center flex flex-col items-center border border-base-300 relative">
-              <div className="w-14 h-14 rounded-full hedera-gradient flex items-center justify-center mb-4">
-                <MagnifyingGlassIcon className="h-7 w-7 text-white" />
-              </div>
-              <h3 className="font-bold text-lg mb-2">Block Explorer</h3>
-              <p className="text-base-content/70 text-sm m-0 mb-6">
-                Explore transactions, addresses, and contract activity on Hedera.
-              </p>
-              <Link href="/blockexplorer" passHref className="btn btn-primary btn-sm">
-                Open Block Explorer
-              </Link>
-            </div>
-          </div>
-
-          <div className="mt-8 bg-base-100 rounded-2xl shadow-md p-8 border border-base-300">
-            <h3 className="font-bold text-lg mb-4 text-center">Quick Start</h3>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
-              <div className="flex items-start gap-3">
-                <span className="font-bold text-primary text-lg leading-none mt-0.5">1</span>
-                <div>
-                  <p className="m-0 font-medium">Edit the frontend</p>
-                  <code className="text-xs bg-base-200 px-2 py-1 rounded">packages/nextjs/app/page.tsx</code>
-                </div>
-              </div>
-              <div className="flex items-start gap-3">
-                <span className="font-bold text-primary text-lg leading-none mt-0.5">2</span>
-                <div>
-                  <p className="m-0 font-medium">Edit your contract</p>
-                  <div className="flex flex-col gap-1">
-                    <code className="text-xs bg-base-200 px-2 py-1 rounded">
-                      packages/hardhat/contracts/HederaToken.sol
-                    </code>
-                    <code className="text-xs bg-base-200 px-2 py-1 rounded">
-                      packages/foundry/contracts/HederaToken.sol
-                    </code>
-                  </div>
-                </div>
-              </div>
-              <div className="flex items-start gap-3">
-                <span className="font-bold text-primary text-lg leading-none mt-0.5">3</span>
-                <div>
-                  <p className="m-0 font-medium">Get testnet HBAR</p>
-                  <HederaPortalFaucet variant="link" label="portal.hedera.com/faucet" showIcon={false} />
-                </div>
-              </div>
-              <div className="flex items-start gap-3">
-                <span className="font-bold text-primary text-lg leading-none mt-0.5">4</span>
-                <div>
-                  <p className="m-0 font-medium">Deploy to Hedera</p>
-                  <div className="flex flex-col gap-1">
-                    <code className="text-xs bg-base-200 px-2 py-1 rounded">
-                      yarn hardhat:deploy --network hederaTestnet
-                    </code>
-                    <code className="text-xs bg-base-200 px-2 py-1 rounded">
-                      yarn foundry:deploy --network hedera_testnet
-                    </code>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
+      )}
+      {attentionCount > 0 && (
+        <div role="alert" className="alert alert-warning text-sm">
+          {attentionCount} plan{attentionCount === 1 ? "" : "s"} need attention.
         </div>
-      </div>
-    </>
+      )}
+
+      {deployed && isConnected && <CreatePlanCard onCreated={refresh} />}
+      {deployed && !isConnected && <p className="text-sm text-base-content/70">Connect a wallet to create a plan.</p>}
+
+      <section className="flex flex-col gap-4" aria-label="Plans">
+        <h2 className="m-0 text-xl font-semibold">Plans</h2>
+        {plans.data?.length === 0 && <p className="text-sm text-base-content/70">No plans indexed yet.</p>}
+        {plans.data?.map(plan => (
+          <PlanCard
+            key={plan.planId}
+            plan={plan}
+            isConnected={isConnected}
+            isOwner={!!address && address.toLowerCase() === plan.owner.toLowerCase()}
+            onChanged={refresh}
+          />
+        ))}
+      </section>
+    </div>
   );
 };
 

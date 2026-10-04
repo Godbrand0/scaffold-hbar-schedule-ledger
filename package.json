@@ -24,9 +24,6 @@
     "foundry:lint": "yarn workspace @sh/foundry lint",
     "foundry:lint-staged": "yarn workspace @sh/foundry lint-staged",
     "foundry:test": "yarn workspace @sh/foundry test",
-    "foundry:test:local": "yarn workspace @sh/foundry test:local",
-    "foundry:test:mainnet": "yarn workspace @sh/foundry test:mainnet",
-    "foundry:test:testnet": "yarn workspace @sh/foundry test:testnet",
     "foundry:verify:mainnet": "yarn workspace @sh/foundry verify:mainnet",
     "foundry:verify:testnet": "yarn workspace @sh/foundry verify:testnet",
     "indexer:build": "node scripts/cargo.mjs build",
@@ -42,8 +39,10 @@
     "next:lint": "yarn workspace @sh/nextjs lint",
     "next:serve": "yarn workspace @sh/nextjs serve",
     "next:start": "yarn workspace @sh/nextjs start",
+    "next:test": "yarn workspace @sh/nextjs test",
     "postinstall": "husky",
-    "precommit": "lint-staged"
+    "precommit": "lint-staged",
+    "test": "yarn foundry:test && yarn next:test && yarn indexer:test"
   },
   "packageManager": "yarn@3.2.3",
   "devDependencies": {

@@ -1,82 +1,49 @@
-# Foundry package (Hedera)
+# Foundry package
 
-Solidity contracts, Forge scripts, and tests for the Hedera EVM.
+Solidity contracts, Forge scripts and tests for the Hedera EVM.
+
+| Path                            | Purpose                                                              |
+| ------------------------------- | -------------------------------------------------------------------- |
+| `contracts/RecurringPayments.sol` | Escrowed recurring payments booked through the Schedule Service      |
+| `contracts/interfaces/`         | `IHederaScheduleService` (HSS system contract at `0x16b`)            |
+| `test/RecurringPayments.t.sol`  | Unit and fuzz tests                                                  |
+| `test/mocks/`                   | Mock HSS and a recipient that rejects funds                          |
+| `script/Deploy.s.sol`           | Deploys `RecurringPayments` and exports `deployments/<chainId>.json` |
 
 ## Setup
 
-Forge dependencies are tracked as git submodules under `packages/foundry/lib`.
-Initialize them from the repo root:
+Forge dependencies (`forge-std`, OpenZeppelin) are git submodules under `lib/`. If you cloned this repository
+directly instead of scaffolding it, fetch them from the repo root:
 
 ```bash
 git submodule update --init --recursive
 ```
 
----
+`create-scaffold-hbar` runs `forge install` for you.
 
-## Deploy (Foundry)
+## Tests
 
-From the repo root, contract deploys for this package use **`yarn foundry:deploy`** (runs `packages/foundry`’s deploy script). Inside `packages/foundry`, use **`yarn deploy`** (same entrypoint).
+```bash
+yarn test        # forge test
+```
 
-- **Local (recommended):** Start the shared local chain from the repo root, then deploy with `--network localhost` (RPC `http://127.0.0.1:8545`).
+The Schedule Service is not available on Anvil or Hedera forks, so the tests etch `MockHederaScheduleService`
+at `0x16b` and fire scheduled calls by hand. This makes them fast and offline, but they cannot prove how the real
+network behaves. Check that against testnet (see the root README).
 
-  ```bash
-  yarn hardhat:chain
-  ```
+The mock stores nothing at construction time because `vm.etch` copies bytecode only. Every default in the mock
+must be the zero value.
 
-  In another terminal (from repo root or this package):
+## Deploy
 
-  ```bash
-  yarn foundry:deploy --network localhost
-  ```
+```bash
+yarn foundry:account:generate      # creates a keystore; fund its address at https://portal.hedera.com/faucet
+yarn foundry:deploy:testnet
+```
 
-  This uses the default keystore `scaffold-hbar-default` where applicable (see `Makefile` / `parseArgs.js`).
-  The deploy flow auto-creates the local `deployments/` directory before writing `deployments/<chainId>.json`.
+The deployer must be a funded Hedera account, otherwise Hashio answers
+`Requested resource not found. address '0x...'`. The Makefile deploys with `--slow --legacy` so each transaction
+confirms before the next one (avoids `WRONG_NONCE`).
 
-- **Plain Anvil (no Hedera fork):** `yarn chain` inside `packages/foundry` runs plain `anvil`—useful for quick iteration, not for full Hedera/HTS parity.
-
-- **Hedera testnet/mainnet:** Use `yarn foundry:deploy --network hedera_testnet` (or `hedera_mainnet`). You **must** use a keystore whose address is a **Hedera-created account** (created and funded via [Hedera Portal](https://portal.hedera.com) or faucet). If you see `Requested resource not found. address '0x...'`, that address does not exist on Hedera. From the repo root, create or import one with `yarn foundry:account:generate` or `yarn foundry:account:import`, then deploy with `--keystore <name>`. For multi-contract deploys, the Makefile uses `--slow` so each transaction is confirmed before the next (avoids `WRONG_NONCE` on Hedera when both txs are in flight).
-
----
-
-## Tests (Foundry)
-
-- **`yarn test`** inside `packages/foundry` (or `forge test`) – Runs tests on a **local Anvil** chain (no Hedera fork).  
-  - **HederaToken** (ERC-20) tests pass.  
-  - **HtsTokenCreator** (HTS precompile) tests are **skipped** – these need a Hedera fork or live RPC.
-
-- **`yarn test:local`** inside `packages/foundry` (or `forge test --fork-url http://127.0.0.1:8545 --chain-id 296 --ffi`) – Runs tests against whatever serves **JSON-RPC on 127.0.0.1:8545** with **chain id 296**.
-
-  **Local setup:**
-
-  ```bash
-  yarn hardhat:chain
-  ```
-
-  Then in another terminal from the repo root:
-
-  ```bash
-  yarn foundry:test:local
-  ```
-
-  Or from this package: `yarn test:local`.
-
-  This command attaches to the shared local JSON-RPC at `:8545`.
-
-- **`yarn test:testnet`** inside `packages/foundry` – Fork from Hedera testnet RPC (`HEDERA_RPC_URL` or default) with [hedera-forking](https://github.com/hashgraph/hedera-forking) HTS emulation via `htsSetup()` where applicable.
-
-- **`yarn test:mainnet`** inside `packages/foundry` – Fork from Hedera mainnet RPC (read-only / snapshot style checks).
-
----
-
-## Summary
-
-| Command             | Chain        | HederaToken | HtsTokenCreator |
-| ------------------- | ------------ | ----------- | --------------- |
-| `yarn test`         | Anvil        | ✅          | ⏭️ (skipped)    |
-| `yarn test:local`   | Local fork\* | ✅          | ✅              |
-| `yarn test:testnet` | Testnet RPC  | ✅          | ✅              |
-| `yarn test:mainnet` | Mainnet RPC  | ✅          | ✅ (read-only)  |
-
-\* Run `yarn hardhat:chain` from the repo root first.
-
-For more on fork testing with HTS emulation, see [forking the Hedera network for local testing](https://docs.hedera.com/hedera/core-concepts/smart-contracts/forking-hedera-network-for-local-testing).
+After deploying, `deployments/296.json` holds the address and `packages/nextjs/contracts/deployedContracts.ts` is
+regenerated for the frontend.

@@ -1,78 +1,192 @@
-# Scaffold-HBAR — Blank starter
+# Schedule Ledger
 
-Minimal Hedera dApp baseline: Next.js, Hardhat or Foundry, and Hedera networks (testnet, mainnet, local fork). No opinionated product UI — you add the app on top.
+A [Scaffold-HBAR](https://docs.hedera.com/solutions/tools/scaffold-hbar) template for products built on
+**scheduled payments**. It combines three pieces:
 
-CLI key: `blank` (branch `templates/blank-template`).
-
-The full product guide — CLI flags, npm vs Yarn, deploy, and verify — lives in [Scaffold HBAR on Hedera docs](https://docs.hedera.com/solutions/tools/scaffold-hbar/index). This README is what is specific to **this** template.
-
-## What's in this template
-
-- Next.js App Router with wallet connect, **Debug Contracts**, and a local block explorer
-- Sample HTS contracts (`HederaToken`, `HtsTokenCreator`) so Debug Contracts has something to call
-- Hardhat and Foundry packages (the CLI can drop one)
-- Hashio RPC + Mirror Node config for Hedera testnet and mainnet
-- Package manager: Yarn (recommended) or npm — see `template.json`
-
-Create a project from this template:
+- A Solidity contract that escrows HBAR and pays itself out on a timer using the **Hedera Schedule Service**
+  ([HIP-1215](https://hips.hedera.com/hip/hip-1215)), with no off-chain keeper.
+- A **Rust indexer** that follows the contract through the mirror node and records what happened to every run,
+  including runs that failed.
+- A **Next.js dashboard** that creates plans and shows their real status.
 
 ```bash
-npm create scaffold-hbar@latest -- --template blank
+npm create scaffold-hbar@latest -- --template Godbrand0/scaffold-hbar-schedule-ledger
 ```
 
-`npx create-scaffold-hbar@latest --template blank` is equivalent. The CLI also asks for frontend, Solidity framework, network, and package manager.
+## Why this template exists
 
-## Work from this repository
+HSS makes "run this contract call later" a native feature, but it fails quietly:
 
-This branch uses Yarn workspaces, so clone-and-run needs Yarn. Apps created with the CLI can use Yarn (default) or npm; see the [docs](https://docs.hedera.com/solutions/tools/scaffold-hbar/index).
+- `scheduleCall` **never reverts**. When the network refuses a booking (for example because the target second is
+  full) it returns a status code and a zero address. A contract that ignores that value silently stops paying.
+- A scheduled execution can fail **after** the booking succeeded. Nothing on the contract side records that.
+- HIP-1215 defines **no events**, so there is nothing to subscribe to.
 
-### Prerequisites
+A frontend that only reads contract state cannot tell a user "your payment failed, and here is why". This template
+handles both layers: the contract turns every failure into an event and a recoverable state, and the indexer joins
+those events with the mirror node's schedule and execution records.
 
-- [Node.js](https://nodejs.org/) ≥ 20.18.3
-- [Git](https://git-scm.com/) with `user.name` and `user.email` configured
-- [Yarn](https://yarnpkg.com/) (default; required if you clone this repo) or npm if you scaffolded with the CLI. For Yarn, install via Corepack:
-  ```bash
-  corepack enable && corepack prepare yarn@stable --activate
-  ```
-- **If using Foundry:** [Foundry](https://book.getfoundry.sh/getting-started/installation) (`forge`, `cast`, `anvil`)
+If you are building payroll, subscriptions, rent, vesting or any recurring payout on Hedera, you can start from here
+and change the contract's payout logic. The indexer and dashboard keep working as long as you keep the events.
 
-### Quick start
+## What is in the repository
+
+| Package             | What it is                                                                          |
+| ------------------- | ----------------------------------------------------------------------------------- |
+| `packages/foundry`  | `RecurringPayments.sol`, mocks, Forge tests, deploy script                           |
+| `packages/indexer`  | Rust service: mirror node poller, event decoder, SQLite store, HTTP API              |
+| `packages/nextjs`   | Dashboard built on the Scaffold-HBAR frontend (wagmi, RainbowKit, DaisyUI)           |
+
+## How it works
+
+```
+                 createPlan{value}                    scheduleCall(executeRun)
+   user wallet ───────────────────▶ RecurringPayments ─────────────────────────▶ HSS (0x16b)
+                                      │   ▲                                         │
+                       events         │   └──────────── executeRun(planId) ◀────────┘
+                                      ▼                  (network fires it at the booked second)
+                           Hedera mirror node REST
+        /contracts/{id}/results/logs · /schedules/{id} · /transactions?timestamp=
+                                      │
+                                      ▼
+                    Rust indexer ── SQLite ── HTTP API :4000
+                                      │
+                                      ▼
+                              Next.js dashboard
+```
+
+**The payment loop.** `createPlan` escrows `amountPerRun × runs` and books the first run. When HSS fires
+`executeRun`, the contract pays the recipient and books the next run, until the last run completes.
+
+**A plan is always in one of these states:**
+
+| State             | Meaning                                                        | How it recovers                         |
+| ----------------- | -------------------------------------------------------------- | --------------------------------------- |
+| `active`          | A run is booked and funds are escrowed                         | n/a                                     |
+| `needs_reschedule`| HSS refused to book the next run (`ScheduleFailed` event)       | anyone calls `rebook(planId)`           |
+| `paused`          | The recipient rejected a payment (`PaymentFailed` event)        | owner calls `resume(planId)`            |
+| `completed`       | Every run paid                                                 | terminal                                |
+| `cancelled`       | Owner cancelled; unpaid escrow refunded                        | terminal                                |
+
+A booking failure never rolls back a payment that already went out. `executeRun` is open to anyone once a run is
+due, so a missed schedule can always be nudged by hand; the amount and recipient are fixed by the plan.
+
+**What the indexer adds.** For every `ScheduleBooked` event it looks up the schedule on the mirror node and ends
+up with one of `pending`, `executed`, `failed` (with the HAPI result code) or `deleted`. A plan is flagged
+`needsAttention` when it is `needs_reschedule`, `paused`, has a failed schedule, or has a booked run that is still
+unpaid well past its expiry (`overdue`).
+
+## Quick start
+
+**Prerequisites:** Node 20.18.3+, Yarn, [Foundry](https://book.getfoundry.sh/getting-started/installation),
+and [Rust](https://rustup.rs) (only for the indexer).
 
 ```bash
-yarn install
+npm create scaffold-hbar@latest -- --template Godbrand0/scaffold-hbar-schedule-ledger my-app
+cd my-app
 
-# Terminal 1: local Hedera-forked node
-yarn hardhat:chain
+yarn foundry:test                    # 26 contract tests, offline, mock Schedule Service
+yarn foundry:account:generate        # create a deployer keystore
+# fund the printed address at https://portal.hedera.com/faucet
+yarn foundry:deploy:testnet          # deploys RecurringPayments, regenerates the frontend ABI
 
-# Terminal 2: deploy to that node (8545)
-yarn hardhat:deploy --network localhost
+cp packages/indexer/.env.example packages/indexer/.env
+# edit packages/indexer/.env: set CONTRACT_ADDRESS to the deployed address
+yarn indexer:start                   # API on http://127.0.0.1:4000
 
-# Terminal 3: Next.js app
-yarn next:start
+cp packages/nextjs/.env.example packages/nextjs/.env
+yarn next:dev                        # http://localhost:3000
 ```
 
-Open [http://localhost:3000](http://localhost:3000) and use the **Debug Contracts** page.
+The Schedule Service does **not** exist on Anvil or Hedera forks, so scheduling only works on testnet or mainnet.
+Before the first deploy the dashboard shows setup steps instead of failing.
 
-Frontend only (no local chain):
+### Without Rust
 
-```bash
-yarn install
-yarn next:dev
-```
+`cargo` is only needed to run the indexer. If it is missing, `yarn lint`, `yarn indexer:build` and
+`yarn indexer:test` print a warning and skip; `yarn indexer:start` stops with install instructions. Contracts and
+the dashboard work without it, but the dashboard will have no data source.
 
-`yarn hardhat:deploy` without `--network localhost` targets the in-process `hardhat` network, not the long-running fork. Local Hardhat and Foundry workflows are in [`packages/hardhat/README.md`](packages/hardhat/README.md) and [`packages/foundry/README.md`](packages/foundry/README.md). Deploy and verify on testnet/mainnet: [Hedera docs](https://docs.hedera.com/solutions/tools/scaffold-hbar/index#deploying-to-testnet).
+## Configuration
 
-## Project layout
+| Where                       | Variable                      | Default                                  | Purpose                                              |
+| --------------------------- | ----------------------------- | ---------------------------------------- | ---------------------------------------------------- |
+| `packages/indexer/.env`     | `CONTRACT_ADDRESS` (required) | none                                     | Contract to follow: `0x` address or `0.0.N` ID        |
+|                             | `MIRROR_NODE_URL`             | `https://testnet.mirrornode.hedera.com`  | Mirror node REST base URL                            |
+|                             | `DATABASE_PATH`               | `indexer.db`                             | SQLite file                                          |
+|                             | `BIND_ADDR`                   | `127.0.0.1:4000`                         | API listen address                                   |
+|                             | `POLL_INTERVAL_SECS`          | `5`                                      | Seconds between polls                                |
+|                             | `OVERDUE_GRACE_SECS`          | `60`                                     | Grace before an unpaid booked run counts as overdue  |
+| `packages/nextjs/.env`      | `NEXT_PUBLIC_INDEXER_URL`     | `http://127.0.0.1:4000`                  | Where the dashboard reads plans from                 |
+|                             | `NEXT_PUBLIC_WALLET_CONNECT_PROJECT_ID` | bundled demo id                | WalletConnect                                        |
+| `packages/foundry/.env`     | `HEDERA_RPC_URL`              | `https://testnet.hashio.io/api`          | JSON-RPC endpoint                                    |
 
-- **packages/hardhat** — Hardhat config, contracts, `deploy/` scripts, tests
-- **packages/foundry** — Forge config, contracts, `script/` deploy scripts, tests
-- **packages/nextjs** — Next.js app, RainbowKit, wagmi, scaffold config
+## Indexer API
 
-Network and RPC URLs are in `packages/hardhat/hardhat.config.ts` and `packages/foundry/foundry.toml` respectively.
+All responses are JSON. Amounts are strings in tinybar.
 
-## Links
+| Route                       | Returns                                                                     |
+| --------------------------- | --------------------------------------------------------------------------- |
+| `GET /health`               | `lastSyncOkAt`, `secondsSinceSync`, `lastError`, `cursor`                    |
+| `GET /plans`                | All plans with derived status, schedules, `needsAttention`, `overdue`        |
+| `GET /plans/:id`            | One plan plus its events (404 if unknown)                                    |
+| `GET /events?planId=&limit=`| Decoded contract events, newest first (`limit` 1–500, default 100)           |
+| `GET /schedules?status=`    | Schedules, optionally filtered by `pending\|executed\|failed\|deleted`        |
 
-- [Scaffold HBAR docs](https://docs.hedera.com/solutions/tools/scaffold-hbar/index)
-- [create-scaffold-hbar](https://github.com/hedera-dev/create-scaffold-hbar) — CLI
-- [Hedera Portal faucet](https://portal.hedera.com/faucet)
-- [HashScan](https://hashscan.io/)
+**Delivery guarantees.** Events are keyed by consensus timestamp and log index, so re-reading is harmless. The
+cursor and the derived state move in one SQLite transaction. If the mirror node is down, the cursor does not move
+and the next poll retries. A log that cannot be decoded is skipped with a warning rather than blocking the indexer.
+The data is as fresh as the mirror node (a few seconds behind consensus) plus the poll interval.
+
+## Making it yours
+
+1. **Change the payout logic** in `packages/foundry/contracts/RecurringPayments.sol` (a different split, a token
+   instead of HBAR, a USD-denominated amount from an oracle, and so on).
+2. **Keep or extend the events.** If you add or change an event, update three places together:
+   the `sol!` block in `packages/indexer/src/events.rs`, the `LedgerEvent` enum and `apply_to_state` in
+   `packages/indexer/src/store.rs`, and the dashboard types in `packages/nextjs/utils/schedule-ledger/indexer.ts`.
+3. **Extend the tests.** `test/RecurringPayments.t.sol` shows the mock-HSS pattern; `tests/pipeline.rs` shows how to
+   feed encoded logs through a fake mirror node.
+
+## Tests
+
+| Command                | What it runs                                                        | Needs network |
+| ---------------------- | ------------------------------------------------------------------- | ------------- |
+| `yarn foundry:test`    | 26 Forge tests incl. a fuzz test on escrow accounting                | no            |
+| `yarn indexer:test`    | 16 unit tests and 11 end-to-end tests against a fake mirror node     | no            |
+| `yarn next:test`       | 12 tests for HBAR unit conversion and attention logic                | no            |
+| `yarn test`            | all of the above                                                    | no            |
+| `cd packages/indexer && cargo test --test live_testnet -- --ignored` | Pins the mirror node response shapes against real testnet | yes |
+
+`yarn lint` runs ESLint, `the Foundry package lint and `cargo fmt --check` plus
+`cargo clippy -D warnings`.
+
+## Hedera details worth knowing
+
+- **Units.** Inside the EVM on Hedera, `msg.value` is in **tinybar** (1 HBAR = 1e8). Wallets and JSON-RPC use
+  18-decimal weibar (1 tinybar = 1e10 weibar) and Hedera converts. The contract takes tinybar; the dashboard
+  converts with `tinybarToWeibar` for the transaction `value`. `utils/schedule-ledger/units.ts` holds the helpers.
+- **HSS never reverts**, so the contract checks `hasScheduleCapacity` first and probes a few seconds past the target
+  when a second is full, as suggested in HIP-1215. If nothing has capacity it reports `CAPACITY_UNAVAILABLE` (`-1`).
+- **Do not book from a `DELEGATECALL` frame.** There is an open network issue where such schedules fire and then
+  fail with `INVALID_PAYER_SIGNATURE` ([hiero-consensus-node#27263](https://github.com/hiero-ledger/hiero-consensus-node/issues/27263)).
+  This contract books directly.
+- **Schedule IDs.** A schedule's EVM address is a long-zero address; the indexer converts it to `0.0.N` to query
+  the mirror node.
+- **The mirror node has no server-side `scheduled` filter**, so the indexer finds executions through each
+  schedule's `executed_timestamp`.
+
+## Status and limitations
+
+- **Testnet proof:** pending. The first live deployment and transaction links will be added here.
+- Verified against the live testnet mirror node: the schedule, scheduled-transaction and contract-log response
+  shapes (see the live tests).
+- **Not yet verified on the real network:** end-to-end behaviour of a HIP-1215 contract-call schedule (booking,
+  execution, and the exact mirror node record for a failed contract-call execution), and the tinybar `msg.value`
+  behaviour described above. The Forge tests use a mock HSS, so they prove the contract's logic, not the network's.
+- The recipient is fixed per plan. Plans pay HBAR only; for HTS tokens, replace the transfer in `executeRun`.
+- Mainnet is untested.
+
+## License
+
+MIT. Original work, built on the MIT-licensed Scaffold-HBAR base (BuidlGuidl, hedera-dev). See [LICENSE](LICENSE).

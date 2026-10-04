@@ -1,11 +1,11 @@
 {
-  "name": "blank",
-  "description": "Minimal Scaffold-HBAR starter: Next.js, Hardhat or Foundry, sample HTS contracts, no opinionated product UI.",
+  "name": "schedule-ledger",
+  "description": "Recurring HBAR payments on the Hedera Schedule Service (HIP-1215) with a Rust mirror-node indexer that tracks every run, including failures.",
   "create-scaffold-hbar": {
     "capabilities": {
       "frontend": ["nextjs-app"],
-      "solidityFramework": ["foundry", "hardhat"],
-      "packageManager": ["yarn", "npm"]
+      "solidityFramework": ["foundry"],
+      "packageManager": ["yarn"]
     },
     "defaults": {
       "frontend": "nextjs-app",
@@ -15,26 +15,41 @@
     "outro": {
       "sections": [
         {
-          "title": "Next steps",
           "steps": [
             {
+              "text": "The Schedule Service is not available on local chains or Hedera forks, so deploy to Hedera testnet. Unit tests use a mock Schedule Service and run offline. The indexer is a Rust crate and needs cargo (https://rustup.rs)."
+            }
+          ]
+        },
+        {
+          "title": "Suggested steps",
+          "steps": [
+            {
+              "label": "Run the contract tests",
+              "command": "{run:foundry:test}"
+            },
+            {
               "label": "Generate or import a deployer account",
-              "command": "{run:framework:account:generate}"
+              "command": "{run:foundry:account:generate}"
             },
             {
-              "label": "Start a local chain",
-              "command": "{run:framework:chain}"
+              "label": "Fund the account with testnet HBAR",
+              "url": "https://portal.hedera.com/faucet"
             },
             {
-              "label": "Deploy contracts to that node",
-              "command": "{run:framework:deploy} --network localhost"
+              "label": "Deploy RecurringPayments to Hedera testnet",
+              "command": "{run:foundry:deploy:testnet}"
+            },
+            {
+              "label": "Set CONTRACT_ADDRESS in packages/indexer/.env (copy .env.example), then start the indexer",
+              "command": "{run:indexer:start}"
             },
             {
               "label": "Start the frontend",
               "command": "{run:next:dev}"
             },
             {
-              "text": "For Hedera testnet/mainnet deploy and verify, see the Scaffold HBAR docs and your chosen package README under packages/hardhat or packages/foundry."
+              "text": "Then change the contract and the event decoder in packages/indexer/src/events.rs to fit your product."
             }
           ]
         }
