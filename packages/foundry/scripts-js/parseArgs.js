@@ -156,10 +156,17 @@ process.env.ETH_KEYSTORE_ACCOUNT = selectedKeystore;
 // Run make from the foundry package root so it finds the Makefile and forge uses foundry.toml
 const foundryPackageRoot = join(__dirname, "..");
 
-const result = spawnSync("make", ["deploy-and-generate-abis"], {
-  stdio: "inherit",
-  shell: true,
-  cwd: foundryPackageRoot,
-});
+// Hedera networks deploy with `forge create` (see deployCreate.js): `forge script` cannot fork Hashio.
+const useCreate = network === "hedera_testnet" || network === "hedera_mainnet";
+const result = useCreate
+  ? spawnSync("node", ["scripts-js/deployCreate.js"], {
+      stdio: "inherit",
+      cwd: foundryPackageRoot,
+    })
+  : spawnSync("make", ["deploy-and-generate-abis"], {
+      stdio: "inherit",
+      shell: true,
+      cwd: foundryPackageRoot,
+    });
 
 process.exit(result.status);

@@ -42,6 +42,7 @@ CREATE TABLE IF NOT EXISTS plans (
     owner            TEXT    NOT NULL,
     recipient        TEXT    NOT NULL,
     amount_per_run   TEXT    NOT NULL,
+    fee_reserve_per_run TEXT NOT NULL,
     interval_seconds INTEGER NOT NULL,
     total_runs       INTEGER NOT NULL,
     completed_runs   INTEGER NOT NULL DEFAULT 0,
@@ -209,14 +210,24 @@ fn apply_to_state(tx: &rusqlite::Transaction<'_>, e: &StoredEvent) -> Result<()>
             owner,
             recipient,
             amount_per_run,
+            fee_reserve_per_run,
             interval_seconds,
             total_runs,
             ..
         } => {
             tx.execute(
-                "INSERT OR IGNORE INTO plans (plan_id, owner, recipient, amount_per_run, interval_seconds, total_runs, status, created_ts)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'active', ?7)",
-                params![plan_id, owner.to_string(), recipient.to_string(), amount_per_run, interval_seconds, total_runs, e.consensus_ts],
+                "INSERT OR IGNORE INTO plans (plan_id, owner, recipient, amount_per_run, fee_reserve_per_run, interval_seconds, total_runs, status, created_ts)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'active', ?8)",
+                params![
+                    plan_id,
+                    owner.to_string(),
+                    recipient.to_string(),
+                    amount_per_run,
+                    fee_reserve_per_run,
+                    interval_seconds,
+                    total_runs,
+                    e.consensus_ts
+                ],
             )?;
         }
         LedgerEvent::ScheduleBooked {
@@ -301,7 +312,8 @@ fn schedules_json(conn: &Connection, plan_id: Option<i64>, status: Option<&str>)
 fn plan_json(conn: &Connection, plan_id: i64, now_secs: i64, grace_secs: i64) -> Result<Option<Value>> {
     let row = conn
         .query_row(
-            "SELECT owner, recipient, amount_per_run, interval_seconds, total_runs, completed_runs, status, next_run_at, last_error, created_ts
+            "SELECT owner, recipient, amount_per_run, fee_reserve_per_run, interval_seconds, total_runs, completed_runs, status,
+                    next_run_at, last_error, created_ts
              FROM plans WHERE plan_id = ?1",
             [plan_id],
             |r| {
@@ -309,18 +321,31 @@ fn plan_json(conn: &Connection, plan_id: i64, now_secs: i64, grace_secs: i64) ->
                     r.get::<_, String>(0)?,
                     r.get::<_, String>(1)?,
                     r.get::<_, String>(2)?,
-                    r.get::<_, i64>(3)?,
+                    r.get::<_, String>(3)?,
                     r.get::<_, i64>(4)?,
                     r.get::<_, i64>(5)?,
-                    r.get::<_, String>(6)?,
-                    r.get::<_, Option<i64>>(7)?,
-                    r.get::<_, Option<String>>(8)?,
-                    r.get::<_, i64>(9)?,
+                    r.get::<_, i64>(6)?,
+                    r.get::<_, String>(7)?,
+                    r.get::<_, Option<i64>>(8)?,
+                    r.get::<_, Option<String>>(9)?,
+                    r.get::<_, i64>(10)?,
                 ))
             },
         )
         .optional()?;
-    let Some((owner, recipient, amount, interval, total, completed, status, next_run_at, last_error, created_ts)) = row
+    let Some((
+        owner,
+        recipient,
+        amount,
+        fee_reserve,
+        interval,
+        total,
+        completed,
+        status,
+        next_run_at,
+        last_error,
+        created_ts,
+    )) = row
     else {
         return Ok(None);
     };
@@ -341,6 +366,7 @@ fn plan_json(conn: &Connection, plan_id: i64, now_secs: i64, grace_secs: i64) ->
         "owner": owner,
         "recipient": recipient,
         "amountPerRun": amount,
+        "feeReservePerRun": fee_reserve,
         "intervalSeconds": interval,
         "totalRuns": total,
         "completedRuns": completed,

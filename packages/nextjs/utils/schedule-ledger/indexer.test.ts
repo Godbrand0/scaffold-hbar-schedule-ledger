@@ -6,6 +6,7 @@ const plan = (overrides: Partial<PlanView> = {}): PlanView => ({
   owner: "0xowner",
   recipient: "0xrecipient",
   amountPerRun: "100",
+  feeReservePerRun: "50",
   intervalSeconds: 3600,
   totalRuns: 3,
   completedRuns: 0,

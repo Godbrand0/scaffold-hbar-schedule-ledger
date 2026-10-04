@@ -11,6 +11,7 @@ sol! {
         address indexed owner,
         address indexed recipient,
         uint256 amountPerRun,
+        uint256 feeReservePerRun,
         uint32 intervalSeconds,
         uint32 totalRuns
     );
@@ -31,6 +32,7 @@ pub enum LedgerEvent {
         owner: Address,
         recipient: Address,
         amount_per_run: String,
+        fee_reserve_per_run: String,
         interval_seconds: u32,
         total_runs: u32,
     },
@@ -114,11 +116,13 @@ impl LedgerEvent {
                 owner,
                 recipient,
                 amount_per_run,
+                fee_reserve_per_run,
                 interval_seconds,
                 total_runs,
                 ..
             } => json!({
                 "owner": owner.to_string(), "recipient": recipient.to_string(), "amountPerRun": amount_per_run,
+                "feeReservePerRun": fee_reserve_per_run,
                 "intervalSeconds": interval_seconds, "totalRuns": total_runs,
             }),
             Self::ScheduleBooked {
@@ -162,6 +166,7 @@ pub fn decode(topics: &[B256], data: &[u8]) -> Result<Option<LedgerEvent>> {
             owner: e.owner,
             recipient: e.recipient,
             amount_per_run: e.amountPerRun.to_string(),
+            fee_reserve_per_run: e.feeReservePerRun.to_string(),
             interval_seconds: e.intervalSeconds,
             total_runs: e.totalRuns,
         }
@@ -248,6 +253,7 @@ mod tests {
             owner: OWNER,
             recipient: RECIPIENT,
             amountPerRun: U256::from(1_000_000u64),
+            feeReservePerRun: U256::from(500_000u64),
             intervalSeconds: 3600,
             totalRuns: 3,
         });
@@ -259,6 +265,7 @@ mod tests {
                 owner: OWNER,
                 recipient: RECIPIENT,
                 amount_per_run: "1000000".into(),
+                fee_reserve_per_run: "500000".into(),
                 interval_seconds: 3600,
                 total_runs: 3
             }

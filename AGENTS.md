@@ -44,6 +44,12 @@ Use `yarn`. Rust is only needed for `indexer:*`; without `cargo` those scripts w
 - **HSS never reverts.** `scheduleCall` returns `(int64 code, address)`; `22` is success. Always check both values
   and always call `hasScheduleCapacity` first. Never book from a `DELEGATECALL` frame
   (hiero-consensus-node#27263).
+- **The contract pays its own scheduled calls.** Each plan prepays `feeReservePerRun`; without it a run fails with
+  `INSUFFICIENT_PAYER_BALANCE` and the escrow is eaten by fees. Booking costs about 1.6M gas: send `createPlan`,
+  `rebook` and `resume` with an explicit gas limit (`BOOKING_GAS_LIMIT` in the frontend).
+- **`block.timestamp` can be earlier than the second HSS fired at**, so the due check has
+  `DUE_TOLERANCE_SECONDS`. Do not make it strict.
+- **Deploy with `yarn foundry:deploy:testnet`.** It uses `forge create` because `forge script` cannot fork Hashio.
 - **Units.** `msg.value` inside the EVM is tinybar (1 HBAR = 1e8). Wallet `value` is 18-decimal weibar
   (1 tinybar = 1e10). Use `tinybarToWeibar` in the frontend. Amounts reach the API as tinybar strings.
 - **HSS does not exist on Anvil or forks.** Tests etch `MockHederaScheduleService` at `0x16b`. `vm.etch` copies

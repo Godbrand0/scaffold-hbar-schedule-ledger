@@ -1,6 +1,7 @@
 "use client";
 
 import { useScaffoldWriteContract } from "~~/hooks/scaffold-hbar";
+import { BOOKING_GAS_LIMIT } from "~~/utils/schedule-ledger/gas";
 import { PlanStatus, PlanView, attentionMessage } from "~~/utils/schedule-ledger/indexer";
 import { formatInterval, tinybarToHbar } from "~~/utils/schedule-ledger/units";
 
@@ -28,7 +29,9 @@ export const PlanCard = ({ plan, isConnected, isOwner, onChanged }: PlanCardProp
   const isOpen = plan.status !== "completed" && plan.status !== "cancelled";
 
   const run = async (functionName: "cancel" | "rebook" | "resume") => {
-    await writeContractAsync({ functionName, args: [BigInt(plan.planId)] });
+    // rebook and resume book a new schedule, which needs an explicit gas limit (see utils/schedule-ledger/gas.ts).
+    const gas = functionName === "cancel" ? undefined : BOOKING_GAS_LIMIT;
+    await writeContractAsync({ functionName, args: [BigInt(plan.planId)], gas });
     onChanged();
   };
 
@@ -41,6 +44,9 @@ export const PlanCard = ({ plan, isConnected, isOwner, onChanged }: PlanCardProp
         </div>
         <p className="m-0 text-sm break-all">
           {tinybarToHbar(plan.amountPerRun)} HBAR every {formatInterval(plan.intervalSeconds)} to {plan.recipient}
+        </p>
+        <p className="m-0 text-xs text-base-content/70">
+          Network fee reserve: {tinybarToHbar(plan.feeReservePerRun)} HBAR per run
         </p>
         <progress className="progress progress-primary w-full" value={plan.completedRuns} max={plan.totalRuns} />
         <p className="m-0 text-xs text-base-content/70">

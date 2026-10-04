@@ -55,8 +55,14 @@ and change the contract's payout logic. The indexer and dashboard keep working a
                               Next.js dashboard
 ```
 
-**The payment loop.** `createPlan` escrows `amountPerRun × runs` and books the first run. When HSS fires
-`executeRun`, the contract pays the recipient and books the next run, until the last run completes.
+**The payment loop.** `createPlan` escrows `(amountPerRun + feeReservePerRun) × runs` and books the first run.
+When HSS fires `executeRun`, the contract pays the recipient and books the next run, until the last run completes.
+
+**The fee reserve.** The payer of a contract-scheduled call is the contract itself. Each run costs real network
+fees (mostly for booking the *next* run, about 1.6M gas), and the network refuses to start a scheduled call unless
+the payer holds `gasLimit × gasPrice`. The per-run `feeReservePerRun` is prepaid into the contract for this. It is
+never paid to the recipient, and it is refunded only for runs that never fire (on `cancel`). Without it, the first
+run fails with `INSUFFICIENT_PAYER_BALANCE` and the escrow is silently eaten by fees (observed on testnet).
 
 **A plan is always in one of these states:**
 
@@ -85,7 +91,7 @@ and [Rust](https://rustup.rs) (only for the indexer).
 npm create scaffold-hbar@latest -- --template Godbrand0/scaffold-hbar-schedule-ledger my-app
 cd my-app
 
-yarn foundry:test                    # 26 contract tests, offline, mock Schedule Service
+yarn foundry:test                    # 28 contract tests, offline, mock Schedule Service
 yarn foundry:account:generate        # create a deployer keystore
 # fund the printed address at https://portal.hedera.com/faucet
 yarn foundry:deploy:testnet          # deploys RecurringPayments, regenerates the frontend ABI
@@ -152,8 +158,8 @@ The data is as fresh as the mirror node (a few seconds behind consensus) plus th
 
 | Command                | What it runs                                                        | Needs network |
 | ---------------------- | ------------------------------------------------------------------- | ------------- |
-| `yarn foundry:test`    | 26 Forge tests incl. a fuzz test on escrow accounting                | no            |
-| `yarn indexer:test`    | 16 unit tests and 11 end-to-end tests against a fake mirror node     | no            |
+| `yarn foundry:test`    | 28 Forge tests incl. a fuzz test on escrow accounting                | no            |
+| `yarn indexer:test`    | 16 unit tests and 12 end-to-end tests against a fake mirror node     | no            |
 | `yarn next:test`       | 12 tests for HBAR unit conversion and attention logic                | no            |
 | `yarn test`            | all of the above                                                    | no            |
 | `cd packages/indexer && cargo test --test live_testnet -- --ignored` | Pins the mirror node response shapes against real testnet | yes |
@@ -163,9 +169,27 @@ The data is as fresh as the mirror node (a few seconds behind consensus) plus th
 
 ## Hedera details worth knowing
 
-- **Units.** Inside the EVM on Hedera, `msg.value` is in **tinybar** (1 HBAR = 1e8). Wallets and JSON-RPC use
-  18-decimal weibar (1 tinybar = 1e10 weibar) and Hedera converts. The contract takes tinybar; the dashboard
-  converts with `tinybarToWeibar` for the transaction `value`. `utils/schedule-ledger/units.ts` holds the helpers.
+Items marked *(measured)* were observed on Hedera testnet while building this template; the mock-based tests could
+not have found them.
+
+- **Units** *(measured)*. Inside the EVM on Hedera, `msg.value` is in **tinybar** (1 HBAR = 1e8). Wallets and
+  JSON-RPC use 18-decimal weibar (1 tinybar = 1e10 weibar) and Hedera converts. The contract takes tinybar; the
+  dashboard converts with `tinybarToWeibar` for the transaction `value`. A plan paying `10000000` tinybar delivered
+  exactly 0.1 HBAR to the recipient. `utils/schedule-ledger/units.ts` holds the helpers.
+- **The contract pays its own scheduled calls** *(measured)*. The schedule's payer is the scheduling contract. With
+  too little balance the schedule still fires, fails with `INSUFFICIENT_PAYER_BALANCE`, and charges a fee anyway.
+  The contract emits nothing in that case, so only the indexer's mirror node lookup reveals it. Fund a reserve per
+  run; the dashboard suggests 1.7 HBAR, which covers `RUN_GAS_LIMIT` (2M) × the testnet gas price (83 tinybar).
+  Check the current price with `cast gas-price` and adjust `SUGGESTED_FEE_RESERVE_HBAR`.
+- **Booking is expensive** *(measured)*. `createPlan`, `rebook` and `resume` each book a schedule, about 1.6M gas
+  (roughly 1.3 HBAR at testnet prices). Send them with an explicit gas limit of at least 1.85M (the dashboard uses
+  2M). The network also needs `value + gasLimit × gasPrice` available up front.
+- **`block.timestamp` can trail the firing second** *(measured)*. HSS fired a run at consensus second `…226.03`
+  while `block.timestamp` inside that call was earlier, so a strict "is it due?" check reverted the schedule's own
+  call with `NotDue`. `executeRun` accepts runs up to `DUE_TOLERANCE_SECONDS` (10) early.
+- **`forge script` cannot deploy to Hashio** *(measured)*. Forge 1.8.3 forks the chain with EIP-1898 block objects
+  and Hashio answers `Invalid parameter 1`. `yarn foundry:deploy:testnet` therefore deploys with `forge create`
+  (see `packages/foundry/scripts-js/deployCreate.js`) and writes the same `deployments/` and frontend files.
 - **HSS never reverts**, so the contract checks `hasScheduleCapacity` first and probes a few seconds past the target
   when a second is full, as suggested in HIP-1215. If nothing has capacity it reports `CAPACITY_UNAVAILABLE` (`-1`).
 - **Do not book from a `DELEGATECALL` frame.** There is an open network issue where such schedules fire and then
@@ -178,12 +202,14 @@ The data is as fresh as the mirror node (a few seconds behind consensus) plus th
 
 ## Status and limitations
 
-- **Testnet proof:** pending. The first live deployment and transaction links will be added here.
-- Verified against the live testnet mirror node: the schedule, scheduled-transaction and contract-log response
-  shapes (see the live tests).
-- **Not yet verified on the real network:** end-to-end behaviour of a HIP-1215 contract-call schedule (booking,
-  execution, and the exact mirror node record for a failed contract-call execution), and the tinybar `msg.value`
-  behaviour described above. The Forge tests use a mock HSS, so they prove the contract's logic, not the network's.
+- **Testnet proof:** pending the final deployment of the current contract. Links will be added here.
+- Verified on the live testnet: the mirror node response shapes (live tests), contract booking through HIP-1215,
+  scheduled execution, the tinybar `msg.value` behaviour, and the indexer detecting two real on-chain failures
+  (`INSUFFICIENT_PAYER_BALANCE` and `CONTRACT_REVERT_EXECUTED`) that the contract itself could not report.
+- The Forge tests use a mock HSS, so they prove the contract's logic, not the network's. The findings above are
+  covered by regression tests, but only the testnet can confirm them.
+- Fee reserve left over after the final run stays in the contract (fees are only known after the fact). Set the
+  reserve close to `gasLimit × gasPrice`.
 - The recipient is fixed per plan. Plans pay HBAR only; for HTS tokens, replace the transfer in `executeRun`.
 - Mainnet is untested.
 

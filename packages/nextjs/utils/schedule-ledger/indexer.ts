@@ -18,6 +18,7 @@ export type PlanView = {
   owner: string;
   recipient: string;
   amountPerRun: string;
+  feeReservePerRun: string;
   intervalSeconds: number;
   totalRuns: number;
   completedRuns: number;

@@ -6,8 +6,15 @@ import { IHederaScheduleService } from "./interfaces/IHederaScheduleService.sol"
 
 /// @title RecurringPayments
 /// @notice Escrowed HBAR payments that pay themselves out on a schedule, using the Hedera Schedule Service.
-/// @dev Each plan escrows `amountPerRun * totalRuns` up front. After every successful run the contract books
-///      the next run through HSS (HIP-1215), so no off-chain keeper is needed.
+/// @dev Each plan escrows `(amountPerRun + feeReservePerRun) * totalRuns` up front. After every successful run the
+///      contract books the next run through HSS (HIP-1215), so no off-chain keeper is needed.
+///
+///      **Network fees.** The payer of a contract-scheduled call is the contract itself. The network requires the
+///      payer to hold at least `gasLimit * gasPrice` when the call fires (about 1.7 HBAR for `RUN_GAS_LIMIT` at
+///      testnet prices) and then charges the gas actually used, mostly for booking the *next* run. Observed on
+///      testnet: a run with too little balance fails with `INSUFFICIENT_PAYER_BALANCE` and still burns fees.
+///      The per-run `feeReservePerRun` is therefore prepaid into the contract and is never paid to the recipient.
+///      It is refunded only for runs that never fire (on `cancel`).
 ///
 ///      HSS never reverts: a booking can fail and a scheduled execution can fail later. This contract turns
 ///      both cases into events (`ScheduleFailed`, `PaymentFailed`) and into recoverable plan states, so an
@@ -29,6 +36,7 @@ contract RecurringPayments is ReentrancyGuard {
         address owner;
         address payable recipient;
         uint256 amountPerRun;
+        uint256 feeReservePerRun;
         uint32 intervalSeconds;
         uint32 totalRuns;
         uint32 completedRuns;
@@ -46,6 +54,10 @@ contract RecurringPayments is ReentrancyGuard {
     /// @dev A schedule must expire strictly after the current consensus second.
     uint256 public constant MIN_LEAD_SECONDS = 5;
     uint256 public constant CAPACITY_PROBES = 4;
+    /// @dev HSS fires a schedule at a consensus second, but `block.timestamp` inside that execution can still be a
+    ///      second or two earlier. Observed on testnet: a strict `block.timestamp >= nextRunAt` check made the
+    ///      schedule's own call revert with `NotDue`. Runs may therefore start this many seconds early.
+    uint256 public constant DUE_TOLERANCE_SECONDS = 10;
     uint32 public constant MIN_INTERVAL_SECONDS = 60;
 
     uint256 public planCount;
@@ -56,6 +68,7 @@ contract RecurringPayments is ReentrancyGuard {
         address indexed owner,
         address indexed recipient,
         uint256 amountPerRun,
+        uint256 feeReservePerRun,
         uint32 intervalSeconds,
         uint32 totalRuns
     );
@@ -78,20 +91,24 @@ contract RecurringPayments is ReentrancyGuard {
     error WrongStatus(Status current);
     error RefundFailed();
 
-    /// @notice Escrow `amountPerRun * runs` tinybar and start paying `recipient` every `intervalSeconds`.
+    /// @notice Escrow `(amountPerRun + feeReservePerRun) * runs` tinybar and start paying `recipient` every
+    ///         `intervalSeconds`.
     /// @dev `msg.value` must equal the full escrow. The first run is booked immediately. If HSS cannot book it,
     ///      the plan is still created in `NeedsReschedule` so the owner's funds are never stuck mid-creation.
-    function createPlan(address payable recipient, uint256 amountPerRun, uint32 intervalSeconds, uint32 runs)
-        external
-        payable
-        returns (uint256 planId)
-    {
+    ///      Booking costs roughly 1.6M gas, so send `createPlan` with an explicit gas limit of at least 2.5M.
+    function createPlan(
+        address payable recipient,
+        uint256 amountPerRun,
+        uint256 feeReservePerRun,
+        uint32 intervalSeconds,
+        uint32 runs
+    ) external payable returns (uint256 planId) {
         if (recipient == address(0) || recipient == address(this)) revert InvalidRecipient();
         if (amountPerRun == 0) revert InvalidAmount();
         if (intervalSeconds < MIN_INTERVAL_SECONDS) revert InvalidInterval();
         if (runs == 0) revert InvalidRuns();
 
-        uint256 escrow = amountPerRun * runs;
+        uint256 escrow = (amountPerRun + feeReservePerRun) * runs;
         if (msg.value != escrow) revert WrongEscrow(escrow, msg.value);
 
         planId = ++planCount;
@@ -99,6 +116,7 @@ contract RecurringPayments is ReentrancyGuard {
             owner: msg.sender,
             recipient: recipient,
             amountPerRun: amountPerRun,
+            feeReservePerRun: feeReservePerRun,
             intervalSeconds: intervalSeconds,
             totalRuns: runs,
             completedRuns: 0,
@@ -107,18 +125,19 @@ contract RecurringPayments is ReentrancyGuard {
             status: Status.Active
         });
 
-        emit PlanCreated(planId, msg.sender, recipient, amountPerRun, intervalSeconds, runs);
+        emit PlanCreated(planId, msg.sender, recipient, amountPerRun, feeReservePerRun, intervalSeconds, runs);
         _book(planId);
     }
 
-    /// @notice Pay out the next run. HSS calls this at the booked time; anyone may call it once the run is due.
+    /// @notice Pay out the next run. HSS calls this at the booked time; anyone may call it once the run is due
+    ///         (within `DUE_TOLERANCE_SECONDS` of the target second).
     /// @dev Open on purpose: the transfer is fixed by the plan, so a manual call after a missed schedule is
     ///      harmless and acts as a fallback keeper. A failed transfer does not revert. It pauses the plan and
     ///      emits `PaymentFailed`, which keeps the failure visible and the funds safe.
     function executeRun(uint256 planId) external nonReentrant {
         Plan storage plan = _plan(planId);
         if (plan.status != Status.Active) revert WrongStatus(plan.status);
-        if (block.timestamp < plan.nextRunAt) revert NotDue(plan.nextRunAt);
+        if (block.timestamp + DUE_TOLERANCE_SECONDS < plan.nextRunAt) revert NotDue(plan.nextRunAt);
 
         uint32 runIndex = plan.completedRuns + 1;
         plan.scheduleAddress = address(0);
@@ -183,7 +202,7 @@ contract RecurringPayments is ReentrancyGuard {
             HSS.deleteSchedule(scheduleAddress);
         }
 
-        uint256 refund = plan.amountPerRun * (plan.totalRuns - plan.completedRuns);
+        uint256 refund = (plan.amountPerRun + plan.feeReservePerRun) * (plan.totalRuns - plan.completedRuns);
         emit PlanCancelled(planId, refund);
 
         (bool ok,) = payable(plan.owner).call{ value: refund }("");

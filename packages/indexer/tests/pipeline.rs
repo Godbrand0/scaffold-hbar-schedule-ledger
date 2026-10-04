@@ -56,6 +56,7 @@ fn plan_created(ts: &str) -> Value {
             owner: OWNER,
             recipient: RECIPIENT,
             amountPerRun: U256::from(500),
+            feeReservePerRun: U256::from(250),
             intervalSeconds: 3600,
             totalRuns: 3,
         },
@@ -214,6 +215,7 @@ async fn follows_a_plan_from_creation_to_a_successful_run() {
     let (_, plan) = h.get("/plans/1").await;
     assert_eq!(plan["status"], "active");
     assert_eq!(plan["amountPerRun"], "500");
+    assert_eq!(plan["feeReservePerRun"], "250");
     assert_eq!(plan["schedules"][0]["status"], "pending");
     assert_eq!(plan["schedules"][0]["scheduleId"], "0.0.1000");
 
@@ -439,4 +441,26 @@ async fn events_can_be_filtered_by_plan() {
     assert_eq!(all["events"].as_array().unwrap().len(), 2);
     assert_eq!(one["events"].as_array().unwrap().len(), 1);
     assert_eq!(one["events"][0]["kind"], "PlanResumed");
+}
+
+/// Observed on Hedera testnet: the contract is the payer of its own scheduled call, and when its balance is
+/// below gasLimit * gasPrice the network executes the schedule and fails it with INSUFFICIENT_PAYER_BALANCE.
+/// The contract emits nothing in that case, so only the mirror node record reveals it.
+#[tokio::test]
+async fn an_underfunded_payer_failure_is_surfaced_even_though_the_contract_emits_nothing() {
+    let h = Harness::new().await;
+    h.push_logs(vec![
+        plan_created("2000.000000001"),
+        booked("2000.000000001", 1, 5_000_000_000),
+    ]);
+    h.set_schedule("0.0.1000", false, Some("5000.000000001"));
+    h.set_transaction("5000.000000001", "INSUFFICIENT_PAYER_BALANCE");
+
+    h.sync().await;
+
+    let (_, plan) = h.get("/plans/1").await;
+    assert_eq!(plan["status"], "active"); // the contract never learned about the failure
+    assert_eq!(plan["completedRuns"], 0);
+    assert_eq!(plan["schedules"][0]["result"], "INSUFFICIENT_PAYER_BALANCE");
+    assert_eq!(plan["needsAttention"], true);
 }

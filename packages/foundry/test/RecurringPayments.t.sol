@@ -11,9 +11,10 @@ contract RecurringPaymentsTest is Test {
     int64 internal constant SCHEDULE_EXPIRY_IS_BUSY = 359; // sample response-code ordinal returned by the mock
 
     uint256 internal constant AMOUNT = 1_000_000; // tinybar per run
+    uint256 internal constant FEE = 500_000; // prepaid network-fee reserve per run
     uint32 internal constant INTERVAL = 3600;
     uint32 internal constant RUNS = 3;
-    uint256 internal constant ESCROW = AMOUNT * RUNS;
+    uint256 internal constant ESCROW = (AMOUNT + FEE) * RUNS;
 
     RecurringPayments internal ledger;
     MockHederaScheduleService internal hss;
@@ -27,6 +28,7 @@ contract RecurringPaymentsTest is Test {
         address indexed owner,
         address indexed recipient,
         uint256 amountPerRun,
+        uint256 feeReservePerRun,
         uint32 intervalSeconds,
         uint32 totalRuns
     );
@@ -48,12 +50,12 @@ contract RecurringPaymentsTest is Test {
 
     function _create() internal returns (uint256) {
         vm.prank(owner);
-        return ledger.createPlan{ value: ESCROW }(recipient, AMOUNT, INTERVAL, RUNS);
+        return ledger.createPlan{ value: ESCROW }(recipient, AMOUNT, FEE, INTERVAL, RUNS);
     }
 
     function _createFor(address payable to) internal returns (uint256) {
         vm.prank(owner);
-        return ledger.createPlan{ value: ESCROW }(to, AMOUNT, INTERVAL, RUNS);
+        return ledger.createPlan{ value: ESCROW }(to, AMOUNT, FEE, INTERVAL, RUNS);
     }
 
     function _status(uint256 id) internal view returns (RecurringPayments.Status) {
@@ -64,7 +66,7 @@ contract RecurringPaymentsTest is Test {
 
     function test_createPlan_escrowsFundsAndBooksFirstRun() public {
         vm.expectEmit(true, true, true, true);
-        emit PlanCreated(1, owner, recipient, AMOUNT, INTERVAL, RUNS);
+        emit PlanCreated(1, owner, recipient, AMOUNT, FEE, INTERVAL, RUNS);
         uint256 id = _create();
 
         RecurringPayments.Plan memory plan = ledger.getPlan(id);
@@ -91,21 +93,21 @@ contract RecurringPaymentsTest is Test {
     function test_createPlan_revertsOnWrongEscrow() public {
         vm.prank(owner);
         vm.expectRevert(abi.encodeWithSelector(RecurringPayments.WrongEscrow.selector, ESCROW, ESCROW - 1));
-        ledger.createPlan{ value: ESCROW - 1 }(recipient, AMOUNT, INTERVAL, RUNS);
+        ledger.createPlan{ value: ESCROW - 1 }(recipient, AMOUNT, FEE, INTERVAL, RUNS);
     }
 
     function test_createPlan_validatesInputs() public {
         vm.startPrank(owner);
         vm.expectRevert(RecurringPayments.InvalidRecipient.selector);
-        ledger.createPlan{ value: ESCROW }(payable(address(0)), AMOUNT, INTERVAL, RUNS);
+        ledger.createPlan{ value: ESCROW }(payable(address(0)), AMOUNT, FEE, INTERVAL, RUNS);
         vm.expectRevert(RecurringPayments.InvalidRecipient.selector);
-        ledger.createPlan{ value: ESCROW }(payable(address(ledger)), AMOUNT, INTERVAL, RUNS);
+        ledger.createPlan{ value: ESCROW }(payable(address(ledger)), AMOUNT, FEE, INTERVAL, RUNS);
         vm.expectRevert(RecurringPayments.InvalidAmount.selector);
-        ledger.createPlan(recipient, 0, INTERVAL, RUNS);
+        ledger.createPlan(recipient, 0, FEE, INTERVAL, RUNS);
         vm.expectRevert(RecurringPayments.InvalidInterval.selector);
-        ledger.createPlan{ value: ESCROW }(recipient, AMOUNT, 59, RUNS);
+        ledger.createPlan{ value: ESCROW }(recipient, AMOUNT, FEE, 59, RUNS);
         vm.expectRevert(RecurringPayments.InvalidRuns.selector);
-        ledger.createPlan(recipient, AMOUNT, INTERVAL, 0);
+        ledger.createPlan(recipient, AMOUNT, FEE, INTERVAL, 0);
         vm.stopPrank();
     }
 
@@ -134,6 +136,27 @@ contract RecurringPaymentsTest is Test {
     function test_executeRun_revertsWhenNotDue() public {
         uint256 id = _create();
         vm.expectRevert(abi.encodeWithSelector(RecurringPayments.NotDue.selector, ledger.getPlan(id).nextRunAt));
+        ledger.executeRun(id);
+    }
+
+    /// Regression for a failure seen on testnet: HSS fired the run at the target consensus second, but the EVM
+    /// `block.timestamp` was slightly earlier, so a strict due check reverted the schedule's own call.
+    function test_executeRun_acceptsAScheduleFiringJustBeforeTheTargetSecond() public {
+        uint256 id = _create();
+        uint64 target = ledger.getPlan(id).nextRunAt;
+        vm.warp(target - 2);
+
+        (bool ok,) = hss.fire(0);
+
+        assertTrue(ok);
+        assertEq(ledger.getPlan(id).completedRuns, 1);
+    }
+
+    function test_executeRun_stillRejectsRunsMoreThanTheToleranceEarly() public {
+        uint256 id = _create();
+        uint64 target = ledger.getPlan(id).nextRunAt;
+        vm.warp(target - ledger.DUE_TOLERANCE_SECONDS() - 1);
+        vm.expectRevert(abi.encodeWithSelector(RecurringPayments.NotDue.selector, target));
         ledger.executeRun(id);
     }
 
@@ -177,8 +200,9 @@ contract RecurringPaymentsTest is Test {
         }
         assertEq(uint8(_status(id)), uint8(RecurringPayments.Status.Completed));
         assertEq(ledger.getPlan(id).completedRuns, RUNS);
-        assertEq(address(ledger).balance, 0);
-        assertEq(recipient.balance, ESCROW);
+        // Payouts left the contract; the fee reserve stays behind to cover network fees.
+        assertEq(address(ledger).balance, FEE * RUNS);
+        assertEq(recipient.balance, AMOUNT * RUNS);
         assertEq(hss.callCount(), RUNS); // nothing booked after the final run
     }
 
@@ -308,15 +332,16 @@ contract RecurringPaymentsTest is Test {
 
         uint256 before = owner.balance;
         vm.expectEmit(true, false, false, true);
-        emit PlanCancelled(id, AMOUNT * 2);
+        emit PlanCancelled(id, (AMOUNT + FEE) * 2);
         vm.prank(owner);
         ledger.cancel(id);
 
-        assertEq(owner.balance, before + AMOUNT * 2);
+        assertEq(owner.balance, before + (AMOUNT + FEE) * 2);
         (,,, bool deleted) = hss.calls(1);
         assertTrue(deleted);
         assertEq(uint8(_status(id)), uint8(RecurringPayments.Status.Cancelled));
-        assertEq(address(ledger).balance, 0);
+        // Only the run that already fired keeps its fee reserve in the contract.
+        assertEq(address(ledger).balance, FEE);
     }
 
     function test_cancel_isOwnerOnlyAndNotRepeatable() public {
@@ -337,18 +362,18 @@ contract RecurringPaymentsTest is Test {
     function test_cancel_revertsWhenOwnerCannotReceiveRefund() public {
         RefundRejector rejector = new RefundRejector(ledger);
         vm.deal(address(rejector), ESCROW);
-        uint256 id = rejector.create{ value: 0 }(recipient, AMOUNT, INTERVAL, RUNS);
+        uint256 id = rejector.create{ value: 0 }(recipient, AMOUNT, FEE, INTERVAL, RUNS);
         vm.expectRevert(RecurringPayments.RefundFailed.selector);
         rejector.cancel(id);
     }
 
     // ---------------------------------------------------------------- invariants
 
-    function testFuzz_escrowAlwaysCoversRemainingRuns(uint8 runsSeed, uint8 stepsSeed) public {
+    function testFuzz_escrowAlwaysCoversRemainingRunsAndReserve(uint8 runsSeed, uint8 stepsSeed) public {
         uint32 runs = uint32(bound(runsSeed, 1, 10));
         uint256 steps = bound(stepsSeed, 0, runs);
         vm.prank(owner);
-        uint256 id = ledger.createPlan{ value: AMOUNT * runs }(recipient, AMOUNT, INTERVAL, runs);
+        uint256 id = ledger.createPlan{ value: (AMOUNT + FEE) * runs }(recipient, AMOUNT, FEE, INTERVAL, runs);
 
         for (uint256 i; i < steps; ++i) {
             skip(INTERVAL + 10);
@@ -356,7 +381,9 @@ contract RecurringPaymentsTest is Test {
         }
 
         RecurringPayments.Plan memory plan = ledger.getPlan(id);
-        assertEq(address(ledger).balance, AMOUNT * (plan.totalRuns - plan.completedRuns));
+        assertEq(
+            address(ledger).balance, (AMOUNT + FEE) * (plan.totalRuns - plan.completedRuns) + FEE * plan.completedRuns
+        );
         assertEq(recipient.balance, AMOUNT * plan.completedRuns);
     }
 }
@@ -369,12 +396,12 @@ contract RefundRejector {
         ledger = ledger_;
     }
 
-    function create(address payable to, uint256 amount, uint32 interval, uint32 runs)
+    function create(address payable to, uint256 amount, uint256 fee, uint32 interval, uint32 runs)
         external
         payable
         returns (uint256)
     {
-        return ledger.createPlan{ value: amount * runs }(to, amount, interval, runs);
+        return ledger.createPlan{ value: (amount + fee) * runs }(to, amount, fee, interval, runs);
     }
 
     function cancel(uint256 id) external {

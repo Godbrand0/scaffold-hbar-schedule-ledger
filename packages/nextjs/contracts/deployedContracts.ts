@@ -38,6 +38,19 @@ const deployedContracts = {
         },
         {
           type: "function",
+          name: "DUE_TOLERANCE_SECONDS",
+          inputs: [],
+          outputs: [
+            {
+              name: "",
+              type: "uint256",
+              internalType: "uint256",
+            },
+          ],
+          stateMutability: "view",
+        },
+        {
+          type: "function",
           name: "MIN_INTERVAL_SECONDS",
           inputs: [],
           outputs: [
@@ -116,6 +129,11 @@ const deployedContracts = {
               internalType: "uint256",
             },
             {
+              name: "feeReservePerRun",
+              type: "uint256",
+              internalType: "uint256",
+            },
+            {
               name: "intervalSeconds",
               type: "uint32",
               internalType: "uint32",
@@ -176,6 +194,11 @@ const deployedContracts = {
                 },
                 {
                   name: "amountPerRun",
+                  type: "uint256",
+                  internalType: "uint256",
+                },
+                {
+                  name: "feeReservePerRun",
                   type: "uint256",
                   internalType: "uint256",
                 },
@@ -371,6 +394,12 @@ const deployedContracts = {
             },
             {
               name: "amountPerRun",
+              type: "uint256",
+              indexed: false,
+              internalType: "uint256",
+            },
+            {
+              name: "feeReservePerRun",
               type: "uint256",
               indexed: false,
               internalType: "uint256",
