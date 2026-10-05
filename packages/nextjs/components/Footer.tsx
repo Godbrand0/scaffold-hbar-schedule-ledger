@@ -56,7 +56,7 @@ export const Footer = () => {
               </a>
             </span>
             <span className="opacity-30">|</span>
-            <a href="https://docs.hedera.com/" target="_blank" rel="noreferrer" className="link hover:text-primary">
+            <a href="/docs" className="link hover:text-primary">
               Docs
             </a>
           </div>
