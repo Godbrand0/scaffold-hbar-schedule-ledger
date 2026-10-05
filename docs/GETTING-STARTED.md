@@ -143,6 +143,40 @@ The arguments are, in order: recipient, payment per run, fee reserve per run, in
 | Interval is at least 60 seconds | contract minimum |
 | Always set `--gas-limit` to about 2,000,000 | booking a schedule costs about 1.6M gas |
 
+### Or pay a dollar amount (Supra oracle)
+
+A USD plan pays `usd ÷ price` in HBAR at each run, using Supra's HBAR/USD price. First see what the oracle says now:
+
+```bash
+cast call <contract-0x-address> "quoteUsd(uint256)(uint256,uint256,uint256,uint8)" 25000000 \
+  --rpc-url https://testnet.hashio.io/api
+```
+
+The argument is dollars with 8 decimals (`25000000` = $0.25). It returns the HBAR payout in tinybar, Supra's price
+(18 decimals), the time the price was published (unix milliseconds), and a problem code (`0` means usable). Then:
+
+```bash
+cast send <contract-0x-address> \
+  "createUsdPlan(address,uint256,uint256,uint256,uint32,uint32)(uint256)" \
+  <recipient-0x-address> 25000000 500000000 170000000 60 2 \
+  --value 13.4ether \
+  --rpc-url https://testnet.hashio.io/api \
+  --account <your-keystore> --legacy --gas-limit 2000000
+```
+
+Arguments: recipient, USD per run, **max HBAR per run (the escrowed cap)**, fee reserve per run, interval, runs.
+`--value` is `(cap + fee reserve) × runs`, here `(5 + 1.7) × 2 = 13.4` HBAR. Pick a cap with headroom, about twice
+the quote, so a price drop does not push a run over it. A run that is over the cap, or whose price is stale or
+missing, pauses the plan instead of paying a wrong amount. What a run does not need stays yours:
+
+```bash
+cast send <contract-0x-address> "claimSurplus(uint256)" <plan-id> --rpc-url https://testnet.hashio.io/api \
+  --account <your-keystore> --legacy --gas-limit 200000
+```
+
+In the dashboard this is the **USD (Supra price)** tab on the create form, which previews the live quote and
+suggests the cap.
+
 ## 8. Watch it run
 
 ```bash
@@ -165,6 +199,8 @@ The dashboard shows a warning on any plan that needs attention.
 | Plan `needs_reschedule` | The network refused to book the next run | Anyone can call `rebook(planId)`; the dashboard has a button |
 | Plan `paused` | The recipient rejected a payment | Fix the recipient, then the owner calls `resume(planId)` |
 | A schedule `failed` with `INSUFFICIENT_PAYER_BALANCE` | The fee reserve was too small for the network's fee requirement | Cancel and recreate with a larger reserve |
+| Plan `paused` with "Supra's price is stale" | A USD plan's oracle price was older than the allowed age | Wait for Supra to update (`quoteUsd` returns problem code `0` again), then the owner calls `resume(planId)` |
+| Plan `paused` with "exceed the per-run cap" | HBAR's price fell far enough that the dollar amount needs more than the escrowed cap | Cancel and recreate with a higher cap, or resume if the price recovers |
 | A schedule still `pending` well past its time (`overdue`) | The network did not fire it | Anyone can call `executeRun(planId)` once the run is due |
 | `cancel(planId)` | Stop a plan | Refunds the escrow of runs that have not fired and deletes the pending schedule |
 

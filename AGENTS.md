@@ -25,7 +25,8 @@ Use `yarn`. Rust is only needed for `indexer:*`; without `cargo` those scripts w
 | Path                                              | Purpose                                                      |
 | ------------------------------------------------- | ------------------------------------------------------------ |
 | `packages/foundry/contracts/RecurringPayments.sol` | The contract: plans, escrow, HSS booking, events             |
-| `packages/foundry/test/`                          | Forge tests and `mocks/` (mock HSS, rejecting receiver)      |
+| `packages/foundry/contracts/interfaces/`          | `IHederaScheduleService`, `ISupraSValueFeed`                 |
+| `packages/foundry/test/`                          | Forge tests and `mocks/` (mock HSS, mock Supra, rejecting receiver) |
 | `packages/indexer/src/events.rs`                  | `sol!` event definitions and log decoding                    |
 | `packages/indexer/src/store.rs`                   | SQLite schema, derived plan state (`apply_to_state`)         |
 | `packages/indexer/src/sync.rs`                    | Poll loop, schedule outcome resolution                       |
@@ -47,6 +48,14 @@ Use `yarn`. Rust is only needed for `indexer:*`; without `cargo` those scripts w
 - **The contract pays its own scheduled calls.** Each plan prepays `feeReservePerRun`; without it a run fails with
   `INSUFFICIENT_PAYER_BALANCE` and the escrow is eaten by fees. Booking costs about 1.6M gas: send `createPlan`,
   `rebook` and `resume` with an explicit gas limit (`BOOKING_GAS_LIMIT` in the frontend).
+- **USD plans read Supra at execution time.** `quoteUsd` converts `usdPerRun` (8 decimals) with the oracle's own
+  decimals, rejects a stale, zero, reverting or over-cap price, and pauses the plan with `PriceRejected` instead of
+  paying a wrong amount. Supra's `time` is in **milliseconds**. The cap (`amountPerRun` on a USD plan) is what is
+  escrowed; the unused part accrues in `surplus` and is claimed with `claimSurplus`.
+- **`PriceRejected` is followed by `PaymentFailed` with amount 0.** The indexer relies on that: only a `PaymentFailed`
+  with a non-zero amount writes the "recipient rejected" message.
+- **The constructor needs Supra's storage address, pair and max age.** `deployCreate.js` passes them; tests use
+  `MockSupraStorage`.
 - **`block.timestamp` can be earlier than the second HSS fired at**, so the due check has
   `DUE_TOLERANCE_SECONDS`. Do not make it strict.
 - **Deploy with `yarn foundry:deploy:testnet`.** It uses `forge create` because `forge script` cannot fork Hashio.

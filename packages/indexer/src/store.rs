@@ -1,7 +1,7 @@
 //! SQLite storage. Events are the source of truth; `plans` is derived from them as they are applied.
 //! Writes are idempotent: the primary key is the log's (consensus timestamp, log index).
 
-use crate::events::{schedule_id_from_address, LedgerEvent};
+use crate::events::{price_problem, schedule_id_from_address, LedgerEvent};
 use crate::mirror::format_timestamp;
 use anyhow::Result;
 use rusqlite::{params, Connection, OptionalExtension};
@@ -42,6 +42,7 @@ CREATE TABLE IF NOT EXISTS plans (
     owner            TEXT    NOT NULL,
     recipient        TEXT    NOT NULL,
     amount_per_run   TEXT    NOT NULL,
+    usd_per_run      TEXT    NOT NULL,
     fee_reserve_per_run TEXT NOT NULL,
     interval_seconds INTEGER NOT NULL,
     total_runs       INTEGER NOT NULL,
@@ -210,19 +211,21 @@ fn apply_to_state(tx: &rusqlite::Transaction<'_>, e: &StoredEvent) -> Result<()>
             owner,
             recipient,
             amount_per_run,
+            usd_per_run,
             fee_reserve_per_run,
             interval_seconds,
             total_runs,
             ..
         } => {
             tx.execute(
-                "INSERT OR IGNORE INTO plans (plan_id, owner, recipient, amount_per_run, fee_reserve_per_run, interval_seconds, total_runs, status, created_ts)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'active', ?8)",
+                "INSERT OR IGNORE INTO plans (plan_id, owner, recipient, amount_per_run, usd_per_run, fee_reserve_per_run, interval_seconds, total_runs, status, created_ts)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'active', ?9)",
                 params![
                     plan_id,
                     owner.to_string(),
                     recipient.to_string(),
                     amount_per_run,
+                    usd_per_run,
                     fee_reserve_per_run,
                     interval_seconds,
                     total_runs,
@@ -262,12 +265,37 @@ fn apply_to_state(tx: &rusqlite::Transaction<'_>, e: &StoredEvent) -> Result<()>
                 params![plan_id, run_index],
             )?;
         }
-        LedgerEvent::PaymentFailed { run_index, .. } => {
+        // A USD plan that cannot price a run emits `PriceRejected` (which explains why) and then `PaymentFailed` with
+        // amount 0. Only a real transfer failure carries an amount, so only that one writes the recipient message.
+        LedgerEvent::PaymentFailed { run_index, amount, .. } => {
+            if amount == "0" {
+                tx.execute("UPDATE plans SET status = 'paused' WHERE plan_id = ?1", [plan_id])?;
+            } else {
+                tx.execute(
+                    "UPDATE plans SET status = 'paused', last_error = ?2 WHERE plan_id = ?1",
+                    params![plan_id, format!("recipient rejected payment for run {run_index}")],
+                )?;
+            }
+        }
+        LedgerEvent::PriceRejected {
+            run_index,
+            problem,
+            price,
+            ..
+        } => {
+            let why = match price_problem(*problem) {
+                "OracleReverted" => "the Supra oracle call failed".to_string(),
+                "ZeroPrice" => "Supra returned no usable price".to_string(),
+                "Stale" => format!("Supra's price is stale (last {price})"),
+                "AboveCap" => format!("the payout would exceed the per-run cap at price {price}"),
+                other => format!("price rejected ({other})"),
+            };
             tx.execute(
                 "UPDATE plans SET status = 'paused', last_error = ?2 WHERE plan_id = ?1",
-                params![plan_id, format!("recipient rejected payment for run {run_index}")],
+                params![plan_id, format!("run {run_index} paused: {why}")],
             )?;
         }
+        LedgerEvent::SurplusClaimed { .. } => {}
         LedgerEvent::PlanResumed { .. } => {
             tx.execute(
                 "UPDATE plans SET status = 'active', last_error = NULL WHERE plan_id = ?1",
@@ -312,8 +340,8 @@ fn schedules_json(conn: &Connection, plan_id: Option<i64>, status: Option<&str>)
 fn plan_json(conn: &Connection, plan_id: i64, now_secs: i64, grace_secs: i64) -> Result<Option<Value>> {
     let row = conn
         .query_row(
-            "SELECT owner, recipient, amount_per_run, fee_reserve_per_run, interval_seconds, total_runs, completed_runs, status,
-                    next_run_at, last_error, created_ts
+            "SELECT owner, recipient, amount_per_run, usd_per_run, fee_reserve_per_run, interval_seconds, total_runs,
+                    completed_runs, status, next_run_at, last_error, created_ts
              FROM plans WHERE plan_id = ?1",
             [plan_id],
             |r| {
@@ -322,13 +350,14 @@ fn plan_json(conn: &Connection, plan_id: i64, now_secs: i64, grace_secs: i64) ->
                     r.get::<_, String>(1)?,
                     r.get::<_, String>(2)?,
                     r.get::<_, String>(3)?,
-                    r.get::<_, i64>(4)?,
+                    r.get::<_, String>(4)?,
                     r.get::<_, i64>(5)?,
                     r.get::<_, i64>(6)?,
-                    r.get::<_, String>(7)?,
-                    r.get::<_, Option<i64>>(8)?,
-                    r.get::<_, Option<String>>(9)?,
-                    r.get::<_, i64>(10)?,
+                    r.get::<_, i64>(7)?,
+                    r.get::<_, String>(8)?,
+                    r.get::<_, Option<i64>>(9)?,
+                    r.get::<_, Option<String>>(10)?,
+                    r.get::<_, i64>(11)?,
                 ))
             },
         )
@@ -337,6 +366,7 @@ fn plan_json(conn: &Connection, plan_id: i64, now_secs: i64, grace_secs: i64) ->
         owner,
         recipient,
         amount,
+        usd,
         fee_reserve,
         interval,
         total,
@@ -366,6 +396,7 @@ fn plan_json(conn: &Connection, plan_id: i64, now_secs: i64, grace_secs: i64) ->
         "owner": owner,
         "recipient": recipient,
         "amountPerRun": amount,
+        "usdPerRun": usd,
         "feeReservePerRun": fee_reserve,
         "intervalSeconds": interval,
         "totalRuns": total,

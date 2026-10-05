@@ -3,7 +3,7 @@
 import { useScaffoldWriteContract } from "~~/hooks/scaffold-hbar";
 import { BOOKING_GAS_LIMIT } from "~~/utils/schedule-ledger/gas";
 import { PlanStatus, PlanView, attentionMessage } from "~~/utils/schedule-ledger/indexer";
-import { formatInterval, tinybarToHbar } from "~~/utils/schedule-ledger/units";
+import { formatInterval, formatUsd, tinybarToHbar } from "~~/utils/schedule-ledger/units";
 
 const STATUS_STYLE: Record<PlanStatus, string> = {
   active: "badge-success",
@@ -26,6 +26,7 @@ type PlanCardProps = {
 export const PlanCard = ({ plan, isConnected, isOwner, onChanged }: PlanCardProps) => {
   const { writeContractAsync, isMining } = useScaffoldWriteContract({ contractName: "RecurringPayments" });
   const attention = attentionMessage(plan);
+  const isUsd = plan.usdPerRun !== "0";
   const isOpen = plan.status !== "completed" && plan.status !== "cancelled";
 
   const run = async (functionName: "cancel" | "rebook" | "resume") => {
@@ -43,8 +44,16 @@ export const PlanCard = ({ plan, isConnected, isOwner, onChanged }: PlanCardProp
           <span className={`badge ${STATUS_STYLE[plan.status]}`}>{plan.status.replace("_", " ")}</span>
         </div>
         <p className="m-0 text-sm break-all">
-          {tinybarToHbar(plan.amountPerRun)} HBAR every {formatInterval(plan.intervalSeconds)} to {plan.recipient}
+          {isUsd ? `${formatUsd(plan.usdPerRun)} of HBAR` : `${tinybarToHbar(plan.amountPerRun)} HBAR`} every{" "}
+          {formatInterval(plan.intervalSeconds)} to {plan.recipient}
         </p>
+        {isUsd && (
+          <p className="m-0 text-xs text-base-content/70">
+            Priced in HBAR at each run using Supra&apos;s HBAR/USD oracle. Per-run cap:{" "}
+            {tinybarToHbar(plan.amountPerRun)} HBAR. The run pauses instead of paying if the price is stale or would
+            exceed the cap.
+          </p>
+        )}
         <p className="m-0 text-xs text-base-content/70">
           Network fee reserve: {tinybarToHbar(plan.feeReservePerRun)} HBAR per run
         </p>

@@ -11,14 +11,19 @@ sol! {
         address indexed owner,
         address indexed recipient,
         uint256 amountPerRun,
+        uint256 usdPerRun,
         uint256 feeReservePerRun,
         uint32 intervalSeconds,
         uint32 totalRuns
     );
     event ScheduleBooked(uint256 indexed planId, uint32 runIndex, address scheduleAddress, uint256 expirySecond);
     event ScheduleFailed(uint256 indexed planId, uint32 runIndex, int64 responseCode, uint256 expirySecond);
-    event PaymentExecuted(uint256 indexed planId, uint32 runIndex, address indexed recipient, uint256 amount);
+    event PaymentExecuted(
+        uint256 indexed planId, uint32 runIndex, address indexed recipient, uint256 amount, uint256 hbarUsdPrice
+    );
     event PaymentFailed(uint256 indexed planId, uint32 runIndex, address indexed recipient, uint256 amount);
+    event PriceRejected(uint256 indexed planId, uint32 runIndex, uint8 problem, uint256 price, uint256 updatedAtMs);
+    event SurplusClaimed(uint256 indexed planId, uint256 amount);
     event PlanResumed(uint256 indexed planId);
     event PlanCompleted(uint256 indexed planId);
     event PlanCancelled(uint256 indexed planId, uint256 refunded);
@@ -32,6 +37,7 @@ pub enum LedgerEvent {
         owner: Address,
         recipient: Address,
         amount_per_run: String,
+        usd_per_run: String,
         fee_reserve_per_run: String,
         interval_seconds: u32,
         total_runs: u32,
@@ -53,11 +59,25 @@ pub enum LedgerEvent {
         run_index: u32,
         recipient: Address,
         amount: String,
+        /// Supra HBAR/USD price the payout was based on (oracle decimals); "0" for fixed-HBAR plans.
+        hbar_usd_price: String,
     },
     PaymentFailed {
         plan_id: u64,
         run_index: u32,
         recipient: Address,
+        amount: String,
+    },
+    /// A USD plan could not price a run, so it paused instead of paying.
+    PriceRejected {
+        plan_id: u64,
+        run_index: u32,
+        problem: u8,
+        price: String,
+        updated_at_ms: String,
+    },
+    SurplusClaimed {
+        plan_id: u64,
         amount: String,
     },
     PlanResumed {
@@ -80,6 +100,8 @@ impl LedgerEvent {
             | Self::ScheduleFailed { plan_id, .. }
             | Self::PaymentExecuted { plan_id, .. }
             | Self::PaymentFailed { plan_id, .. }
+            | Self::PriceRejected { plan_id, .. }
+            | Self::SurplusClaimed { plan_id, .. }
             | Self::PlanResumed { plan_id }
             | Self::PlanCompleted { plan_id }
             | Self::PlanCancelled { plan_id, .. } => *plan_id,
@@ -93,6 +115,8 @@ impl LedgerEvent {
             Self::ScheduleFailed { .. } => "ScheduleFailed",
             Self::PaymentExecuted { .. } => "PaymentExecuted",
             Self::PaymentFailed { .. } => "PaymentFailed",
+            Self::PriceRejected { .. } => "PriceRejected",
+            Self::SurplusClaimed { .. } => "SurplusClaimed",
             Self::PlanResumed { .. } => "PlanResumed",
             Self::PlanCompleted { .. } => "PlanCompleted",
             Self::PlanCancelled { .. } => "PlanCancelled",
@@ -104,7 +128,8 @@ impl LedgerEvent {
             Self::ScheduleBooked { run_index, .. }
             | Self::ScheduleFailed { run_index, .. }
             | Self::PaymentExecuted { run_index, .. }
-            | Self::PaymentFailed { run_index, .. } => Some(*run_index),
+            | Self::PaymentFailed { run_index, .. }
+            | Self::PriceRejected { run_index, .. } => Some(*run_index),
             _ => None,
         }
     }
@@ -116,13 +141,14 @@ impl LedgerEvent {
                 owner,
                 recipient,
                 amount_per_run,
+                usd_per_run,
                 fee_reserve_per_run,
                 interval_seconds,
                 total_runs,
                 ..
             } => json!({
                 "owner": owner.to_string(), "recipient": recipient.to_string(), "amountPerRun": amount_per_run,
-                "feeReservePerRun": fee_reserve_per_run,
+                "usdPerRun": usd_per_run, "feeReservePerRun": fee_reserve_per_run,
                 "intervalSeconds": interval_seconds, "totalRuns": total_runs,
             }),
             Self::ScheduleBooked {
@@ -139,12 +165,40 @@ impl LedgerEvent {
             } => json!({
                 "responseCode": response_code, "expirySecond": expiry_second,
             }),
-            Self::PaymentExecuted { recipient, amount, .. } | Self::PaymentFailed { recipient, amount, .. } => json!({
+            Self::PaymentExecuted {
+                recipient,
+                amount,
+                hbar_usd_price,
+                ..
+            } => json!({
+                "recipient": recipient.to_string(), "amount": amount, "hbarUsdPrice": hbar_usd_price,
+            }),
+            Self::PaymentFailed { recipient, amount, .. } => json!({
                 "recipient": recipient.to_string(), "amount": amount,
             }),
+            Self::PriceRejected {
+                problem,
+                price,
+                updated_at_ms,
+                ..
+            } => json!({
+                "problem": price_problem(*problem), "price": price, "updatedAtMs": updated_at_ms,
+            }),
+            Self::SurplusClaimed { amount, .. } => json!({ "amount": amount }),
             Self::PlanCancelled { refunded, .. } => json!({ "refunded": refunded }),
             Self::PlanResumed { .. } | Self::PlanCompleted { .. } => json!({}),
         }
+    }
+}
+
+/// Name of the contract's `PriceProblem` enum value (`None` is 0 and never emitted).
+pub fn price_problem(code: u8) -> &'static str {
+    match code {
+        1 => "OracleReverted",
+        2 => "ZeroPrice",
+        3 => "Stale",
+        4 => "AboveCap",
+        _ => "Unknown",
     }
 }
 
@@ -166,6 +220,7 @@ pub fn decode(topics: &[B256], data: &[u8]) -> Result<Option<LedgerEvent>> {
             owner: e.owner,
             recipient: e.recipient,
             amount_per_run: e.amountPerRun.to_string(),
+            usd_per_run: e.usdPerRun.to_string(),
             fee_reserve_per_run: e.feeReservePerRun.to_string(),
             interval_seconds: e.intervalSeconds,
             total_runs: e.totalRuns,
@@ -192,6 +247,22 @@ pub fn decode(topics: &[B256], data: &[u8]) -> Result<Option<LedgerEvent>> {
             plan_id: narrow(e.planId, "planId")?,
             run_index: e.runIndex,
             recipient: e.recipient,
+            amount: e.amount.to_string(),
+            hbar_usd_price: e.hbarUsdPrice.to_string(),
+        }
+    } else if sig == PriceRejected::SIGNATURE_HASH {
+        let e = PriceRejected::decode_raw_log(t(), data)?;
+        LedgerEvent::PriceRejected {
+            plan_id: narrow(e.planId, "planId")?,
+            run_index: e.runIndex,
+            problem: e.problem,
+            price: e.price.to_string(),
+            updated_at_ms: e.updatedAtMs.to_string(),
+        }
+    } else if sig == SurplusClaimed::SIGNATURE_HASH {
+        let e = SurplusClaimed::decode_raw_log(t(), data)?;
+        LedgerEvent::SurplusClaimed {
+            plan_id: narrow(e.planId, "planId")?,
             amount: e.amount.to_string(),
         }
     } else if sig == PaymentFailed::SIGNATURE_HASH {
@@ -253,6 +324,7 @@ mod tests {
             owner: OWNER,
             recipient: RECIPIENT,
             amountPerRun: U256::from(1_000_000u64),
+            usdPerRun: U256::from(0),
             feeReservePerRun: U256::from(500_000u64),
             intervalSeconds: 3600,
             totalRuns: 3,
@@ -265,6 +337,7 @@ mod tests {
                 owner: OWNER,
                 recipient: RECIPIENT,
                 amount_per_run: "1000000".into(),
+                usd_per_run: "0".into(),
                 fee_reserve_per_run: "500000".into(),
                 interval_seconds: 3600,
                 total_runs: 3
@@ -303,12 +376,64 @@ mod tests {
     }
 
     #[test]
+    fn decodes_a_usd_plan_and_the_price_a_payout_used() {
+        let (t, d) = roundtrip(&PlanCreated {
+            planId: U256::from(2),
+            owner: OWNER,
+            recipient: RECIPIENT,
+            amountPerRun: U256::from(15_000_000_000u64),
+            usdPerRun: U256::from(1_000_000_000u64),
+            feeReservePerRun: U256::from(1),
+            intervalSeconds: 60,
+            totalRuns: 2,
+        });
+        let e = decode(&t, &d).unwrap().unwrap();
+        assert_eq!(e.to_json()["usdPerRun"], "1000000000");
+
+        let (t, d) = roundtrip(&PaymentExecuted {
+            planId: U256::from(2),
+            runIndex: 1,
+            recipient: RECIPIENT,
+            amount: U256::from(9_680_000_000u64),
+            hbarUsdPrice: U256::from(103_310_000_000_000_000u64),
+        });
+        let e = decode(&t, &d).unwrap().unwrap();
+        assert_eq!(e.to_json()["hbarUsdPrice"], "103310000000000000");
+        assert_eq!(e.to_json()["amount"], "9680000000");
+    }
+
+    #[test]
+    fn decodes_price_rejections_with_a_readable_reason() {
+        let (t, d) = roundtrip(&PriceRejected {
+            planId: U256::from(2),
+            runIndex: 1,
+            problem: 3,
+            price: U256::from(100u64),
+            updatedAtMs: U256::from(1_791_190_979_234u64),
+        });
+        let e = decode(&t, &d).unwrap().unwrap();
+        assert_eq!(e.kind(), "PriceRejected");
+        assert_eq!(e.run_index(), Some(1));
+        assert_eq!(e.to_json()["problem"], "Stale");
+        assert_eq!(price_problem(1), "OracleReverted");
+        assert_eq!(price_problem(2), "ZeroPrice");
+        assert_eq!(price_problem(4), "AboveCap");
+        assert_eq!(price_problem(99), "Unknown");
+        let (t, d) = roundtrip(&SurplusClaimed {
+            planId: U256::from(2),
+            amount: U256::from(7),
+        });
+        assert_eq!(decode(&t, &d).unwrap().unwrap().kind(), "SurplusClaimed");
+    }
+
+    #[test]
     fn decodes_payment_and_lifecycle_events() {
         let (t, d) = roundtrip(&PaymentExecuted {
             planId: U256::from(3),
             runIndex: 1,
             recipient: RECIPIENT,
             amount: U256::from(9),
+            hbarUsdPrice: U256::from(0),
         });
         assert_eq!(decode(&t, &d).unwrap().unwrap().kind(), "PaymentExecuted");
         let (t, d) = roundtrip(&PaymentFailed {

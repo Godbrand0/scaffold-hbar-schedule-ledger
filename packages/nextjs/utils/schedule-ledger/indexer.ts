@@ -18,6 +18,8 @@ export type PlanView = {
   owner: string;
   recipient: string;
   amountPerRun: string;
+  /** USD per run with 8 decimals, or "0" for a fixed-HBAR plan. For USD plans `amountPerRun` is the HBAR cap. */
+  usdPerRun: string;
   feeReservePerRun: string;
   intervalSeconds: number;
   totalRuns: number;

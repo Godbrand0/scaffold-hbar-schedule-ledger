@@ -5,6 +5,8 @@ import { Test } from "forge-std/Test.sol";
 import { RecurringPayments } from "../contracts/RecurringPayments.sol";
 import { MockHederaScheduleService } from "./mocks/MockHederaScheduleService.sol";
 import { RejectingReceiver } from "./mocks/RejectingReceiver.sol";
+import { MockSupraStorage } from "./mocks/MockSupraStorage.sol";
+import { ISupraSValueFeed } from "../contracts/interfaces/ISupraSValueFeed.sol";
 
 contract RecurringPaymentsTest is Test {
     address internal constant HSS = 0x000000000000000000000000000000000000016B;
@@ -16,8 +18,16 @@ contract RecurringPaymentsTest is Test {
     uint32 internal constant RUNS = 3;
     uint256 internal constant ESCROW = (AMOUNT + FEE) * RUNS;
 
+    uint256 internal constant HBAR_USD_PAIR = 432;
+    uint256 internal constant MAX_PRICE_AGE = 3600;
+    uint256 internal constant PRICE = 0.1e18; // $0.10 per HBAR, 18 decimals like Supra
+    uint256 internal constant USD_PER_RUN = 10e8; // $10 with 8 decimals
+    uint256 internal constant USD_PAYOUT = 100e8; // $10 at $0.10 per HBAR is 100 HBAR, in tinybar
+    uint256 internal constant CAP = 150e8; // escrowed per-run cap for USD plans, in tinybar
+
     RecurringPayments internal ledger;
     MockHederaScheduleService internal hss;
+    MockSupraStorage internal oracle;
 
     address internal owner = makeAddr("owner");
     address payable internal recipient = payable(makeAddr("recipient"));
@@ -28,13 +38,24 @@ contract RecurringPaymentsTest is Test {
         address indexed owner,
         address indexed recipient,
         uint256 amountPerRun,
+        uint256 usdPerRun,
         uint256 feeReservePerRun,
         uint32 intervalSeconds,
         uint32 totalRuns
     );
     event ScheduleBooked(uint256 indexed planId, uint32 runIndex, address scheduleAddress, uint256 expirySecond);
     event ScheduleFailed(uint256 indexed planId, uint32 runIndex, int64 responseCode, uint256 expirySecond);
-    event PaymentExecuted(uint256 indexed planId, uint32 runIndex, address indexed recipient, uint256 amount);
+    event PaymentExecuted(
+        uint256 indexed planId, uint32 runIndex, address indexed recipient, uint256 amount, uint256 hbarUsdPrice
+    );
+    event PriceRejected(
+        uint256 indexed planId,
+        uint32 runIndex,
+        RecurringPayments.PriceProblem problem,
+        uint256 price,
+        uint256 updatedAtMs
+    );
+    event SurplusClaimed(uint256 indexed planId, uint256 amount);
     event PaymentFailed(uint256 indexed planId, uint32 runIndex, address indexed recipient, uint256 amount);
     event PlanResumed(uint256 indexed planId);
     event PlanCompleted(uint256 indexed planId);
@@ -44,7 +65,9 @@ contract RecurringPaymentsTest is Test {
         // Foundry has no HSS, so etch a mock at the real system contract address.
         vm.etch(HSS, address(new MockHederaScheduleService()).code);
         hss = MockHederaScheduleService(HSS);
-        ledger = new RecurringPayments();
+        oracle = new MockSupraStorage();
+        oracle.set(PRICE, 18, block.timestamp * 1000);
+        ledger = new RecurringPayments(ISupraSValueFeed(address(oracle)), HBAR_USD_PAIR, MAX_PRICE_AGE);
         vm.deal(owner, 100 ether);
     }
 
@@ -62,11 +85,267 @@ contract RecurringPaymentsTest is Test {
         return ledger.getPlan(id).status;
     }
 
+    // ---------------------------------------------------------------- USD plans (Supra oracle)
+
+    function _createUsd(uint32 runs) internal returns (uint256) {
+        vm.prank(owner);
+        return ledger.createUsdPlan{ value: (CAP + FEE) * runs }(recipient, USD_PER_RUN, CAP, FEE, INTERVAL, runs);
+    }
+
+    function _due(uint256 id) internal {
+        vm.warp(ledger.getPlan(id).nextRunAt);
+        oracle.set(oracle.feed_price(), 18, block.timestamp * 1000); // keep the price fresh for the run
+    }
+
+    function test_usdPlan_storesTerms_andEscrowsTheCap() public {
+        vm.expectEmit(true, true, true, true);
+        emit PlanCreated(1, owner, recipient, CAP, USD_PER_RUN, FEE, INTERVAL, 2);
+        uint256 id = _createUsd(2);
+
+        RecurringPayments.Plan memory plan = ledger.getPlan(id);
+        assertEq(plan.usdPerRun, USD_PER_RUN);
+        assertEq(plan.amountPerRun, CAP);
+        assertEq(address(ledger).balance, (CAP + FEE) * 2);
+    }
+
+    function test_usdPlan_paysUsdValueAtTheOraclePrice() public {
+        uint256 id = _createUsd(2);
+        _due(id);
+        vm.expectEmit(true, true, true, true);
+        emit PaymentExecuted(id, 1, recipient, USD_PAYOUT, PRICE);
+
+        hss.fire(0);
+
+        assertEq(recipient.balance, USD_PAYOUT);
+        assertEq(ledger.getPlan(id).completedRuns, 1);
+        assertEq(ledger.getPlan(id).surplus, CAP - USD_PAYOUT);
+    }
+
+    function test_usdPlan_payoutFollowsThePrice() public {
+        uint256 id = _createUsd(2);
+        vm.warp(ledger.getPlan(id).nextRunAt);
+        oracle.set(0.2e18, 18, block.timestamp * 1000); // HBAR doubles, so $10 is only 50 HBAR
+
+        hss.fire(0);
+
+        assertEq(recipient.balance, 50e8);
+    }
+
+    function test_usdPlan_secondRunUsesTheNewPrice() public {
+        uint256 id = _createUsd(2);
+        _due(id);
+        hss.fire(0);
+        vm.warp(ledger.getPlan(id).nextRunAt);
+        oracle.set(0.25e18, 18, block.timestamp * 1000);
+
+        hss.fire(1);
+
+        assertEq(recipient.balance, USD_PAYOUT + 40e8);
+        assertEq(uint8(_status(id)), uint8(RecurringPayments.Status.Completed));
+    }
+
+    function test_usdPlan_pausesOnAStalePrice() public {
+        uint256 id = _createUsd(2);
+        vm.warp(ledger.getPlan(id).nextRunAt);
+        uint256 publishedMs = (block.timestamp - MAX_PRICE_AGE - 1) * 1000;
+        oracle.set(PRICE, 18, publishedMs);
+        vm.expectEmit(true, true, true, true);
+        emit PriceRejected(id, 1, RecurringPayments.PriceProblem.Stale, PRICE, publishedMs);
+
+        hss.fire(0);
+
+        assertEq(uint8(_status(id)), uint8(RecurringPayments.Status.Paused));
+        assertEq(recipient.balance, 0);
+        assertEq(ledger.getPlan(id).completedRuns, 0);
+    }
+
+    function test_usdPlan_acceptsAPriceExactlyAtTheAgeLimit() public {
+        uint256 id = _createUsd(2);
+        vm.warp(ledger.getPlan(id).nextRunAt);
+        oracle.set(PRICE, 18, (block.timestamp - MAX_PRICE_AGE) * 1000);
+
+        hss.fire(0);
+
+        assertEq(recipient.balance, USD_PAYOUT);
+    }
+
+    function test_usdPlan_aFutureTimestampCountsAsFresh() public {
+        uint256 id = _createUsd(2);
+        vm.warp(ledger.getPlan(id).nextRunAt);
+        oracle.set(PRICE, 18, (block.timestamp + 5) * 1000);
+
+        hss.fire(0);
+
+        assertEq(recipient.balance, USD_PAYOUT);
+    }
+
+    function test_usdPlan_pausesWhenTheOracleReverts() public {
+        uint256 id = _createUsd(2);
+        _due(id);
+        oracle.setBroken(true);
+        vm.expectEmit(true, true, true, false);
+        emit PriceRejected(id, 1, RecurringPayments.PriceProblem.OracleReverted, 0, 0);
+
+        hss.fire(0);
+
+        assertEq(uint8(_status(id)), uint8(RecurringPayments.Status.Paused));
+        assertEq(recipient.balance, 0);
+    }
+
+    function test_usdPlan_pausesOnAZeroPrice() public {
+        uint256 id = _createUsd(2);
+        vm.warp(ledger.getPlan(id).nextRunAt);
+        oracle.set(0, 18, block.timestamp * 1000);
+
+        hss.fire(0);
+
+        assertEq(uint8(_status(id)), uint8(RecurringPayments.Status.Paused));
+    }
+
+    function test_usdPlan_pausesWhenThePayoutWouldExceedTheCap() public {
+        uint256 id = _createUsd(2);
+        vm.warp(ledger.getPlan(id).nextRunAt);
+        uint256 low = 0.05e18; // $10 would need 200 HBAR, above the 150 HBAR cap
+        oracle.set(low, 18, block.timestamp * 1000);
+        vm.expectEmit(true, true, true, true);
+        emit PriceRejected(id, 1, RecurringPayments.PriceProblem.AboveCap, low, block.timestamp * 1000);
+
+        hss.fire(0);
+
+        assertEq(uint8(_status(id)), uint8(RecurringPayments.Status.Paused));
+        assertEq(recipient.balance, 0);
+    }
+
+    function test_usdPlan_resumeRetriesWithAFreshPrice() public {
+        uint256 id = _createUsd(1);
+        vm.warp(ledger.getPlan(id).nextRunAt);
+        oracle.set(PRICE, 18, 0); // published at the epoch, so far older than MAX_PRICE_AGE
+        hss.fire(0);
+        assertEq(uint8(_status(id)), uint8(RecurringPayments.Status.Paused));
+
+        oracle.set(PRICE, 18, block.timestamp * 1000);
+        vm.prank(owner);
+        ledger.resume(id);
+        vm.warp(ledger.getPlan(id).nextRunAt);
+        oracle.set(PRICE, 18, block.timestamp * 1000);
+        hss.fire(1);
+
+        assertEq(recipient.balance, USD_PAYOUT);
+        assertEq(uint8(_status(id)), uint8(RecurringPayments.Status.Completed));
+    }
+
+    function test_usdPlan_handlesOracleDecimalsOtherThan18() public {
+        uint256 id = _createUsd(1);
+        vm.warp(ledger.getPlan(id).nextRunAt);
+        oracle.set(10_000_000, 8, block.timestamp * 1000); // $0.10 with 8 decimals
+
+        hss.fire(0);
+
+        assertEq(recipient.balance, USD_PAYOUT);
+    }
+
+    function test_usdPlan_surplusCanBeClaimedByTheOwnerOnly() public {
+        uint256 id = _createUsd(1);
+        _due(id);
+        hss.fire(0);
+        uint256 surplus = CAP - USD_PAYOUT;
+
+        vm.prank(stranger);
+        vm.expectRevert(RecurringPayments.NotOwner.selector);
+        ledger.claimSurplus(id);
+
+        uint256 before = owner.balance;
+        vm.expectEmit(true, false, false, true);
+        emit SurplusClaimed(id, surplus);
+        vm.prank(owner);
+        ledger.claimSurplus(id);
+
+        assertEq(owner.balance, before + surplus);
+        vm.prank(owner);
+        vm.expectRevert(RecurringPayments.NothingToClaim.selector);
+        ledger.claimSurplus(id);
+    }
+
+    function test_usdPlan_cancelRefundsUnpaidRunsAndTheSurplus() public {
+        uint256 id = _createUsd(3);
+        _due(id);
+        hss.fire(0);
+        uint256 before = owner.balance;
+
+        vm.prank(owner);
+        ledger.cancel(id);
+
+        assertEq(owner.balance, before + (CAP + FEE) * 2 + (CAP - USD_PAYOUT));
+        assertEq(ledger.getPlan(id).surplus, 0);
+        // What is left is exactly the fee reserve of the run that fired.
+        assertEq(address(ledger).balance, FEE);
+    }
+
+    /// For any oracle price a USD run either pays a sane amount within the escrowed cap or pauses and pays nothing.
+    function testFuzz_usdPlan_neverPaysAboveTheCapAndKeepsTheBooksBalanced(uint256 price, uint8 decimals) public {
+        price = bound(price, 1, 1e30);
+        decimals = uint8(bound(decimals, 0, 30));
+        uint256 id = _createUsd(2);
+        uint256 contractBefore = address(ledger).balance;
+        vm.warp(ledger.getPlan(id).nextRunAt);
+        oracle.set(price, decimals, block.timestamp * 1000);
+
+        hss.fire(0);
+
+        RecurringPayments.Plan memory plan = ledger.getPlan(id);
+        assertLe(recipient.balance, CAP);
+        assertEq(address(ledger).balance, contractBefore - recipient.balance);
+        if (plan.status == RecurringPayments.Status.Paused) {
+            assertEq(recipient.balance, 0);
+            assertEq(plan.surplus, 0);
+        } else {
+            assertEq(plan.surplus, CAP - recipient.balance);
+        }
+    }
+
+    function test_usdPlan_validatesInputs() public {
+        vm.startPrank(owner);
+        vm.expectRevert(RecurringPayments.InvalidAmount.selector);
+        ledger.createUsdPlan{ value: 0 }(recipient, 0, CAP, FEE, INTERVAL, 1);
+        vm.expectRevert(RecurringPayments.InvalidAmount.selector);
+        ledger.createUsdPlan{ value: 0 }(recipient, USD_PER_RUN, 0, FEE, INTERVAL, 1);
+        vm.expectRevert(abi.encodeWithSelector(RecurringPayments.WrongEscrow.selector, CAP + FEE, 1));
+        ledger.createUsdPlan{ value: 1 }(recipient, USD_PER_RUN, CAP, FEE, INTERVAL, 1);
+        vm.stopPrank();
+    }
+
+    function test_quoteUsd_isAViewAnyoneCanCall() public view {
+        (uint256 tinybar, uint256 price, uint256 updatedAtMs, RecurringPayments.PriceProblem problem) =
+            ledger.quoteUsd(USD_PER_RUN);
+        assertEq(tinybar, USD_PAYOUT);
+        assertEq(price, PRICE);
+        assertEq(updatedAtMs, block.timestamp * 1000);
+        assertEq(uint8(problem), uint8(RecurringPayments.PriceProblem.None));
+    }
+
+    function test_fixedPlans_ignoreTheOracleEntirely() public {
+        uint256 id = _create();
+        oracle.setBroken(true);
+        vm.warp(ledger.getPlan(id).nextRunAt);
+
+        hss.fire(0);
+
+        assertEq(recipient.balance, AMOUNT);
+        assertEq(ledger.getPlan(id).surplus, 0);
+    }
+
+    function test_constructor_rejectsABadOracleConfig() public {
+        vm.expectRevert(RecurringPayments.InvalidOracle.selector);
+        new RecurringPayments(ISupraSValueFeed(address(0)), HBAR_USD_PAIR, MAX_PRICE_AGE);
+        vm.expectRevert(RecurringPayments.InvalidOracle.selector);
+        new RecurringPayments(ISupraSValueFeed(address(oracle)), HBAR_USD_PAIR, 0);
+    }
+
     // ---------------------------------------------------------------- createPlan
 
     function test_createPlan_escrowsFundsAndBooksFirstRun() public {
         vm.expectEmit(true, true, true, true);
-        emit PlanCreated(1, owner, recipient, AMOUNT, FEE, INTERVAL, RUNS);
+        emit PlanCreated(1, owner, recipient, AMOUNT, 0, FEE, INTERVAL, RUNS);
         uint256 id = _create();
 
         RecurringPayments.Plan memory plan = ledger.getPlan(id);
@@ -182,7 +461,7 @@ contract RecurringPaymentsTest is Test {
         uint256 id = _create();
         skip(INTERVAL + 10);
         vm.expectEmit(true, true, false, true);
-        emit PaymentExecuted(id, 1, recipient, AMOUNT);
+        emit PaymentExecuted(id, 1, recipient, AMOUNT, 0);
         vm.prank(stranger);
         ledger.executeRun(id);
     }
@@ -221,7 +500,7 @@ contract RecurringPaymentsTest is Test {
         skip(INTERVAL + 10);
 
         vm.expectEmit(true, true, false, true);
-        emit PaymentExecuted(id, 1, recipient, AMOUNT);
+        emit PaymentExecuted(id, 1, recipient, AMOUNT, 0);
         ledger.executeRun(id);
 
         assertEq(recipient.balance, AMOUNT);

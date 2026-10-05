@@ -12,6 +12,7 @@ const SECTIONS = [
   ["live", "What is live now"],
   ["quickstart", "Quick start"],
   ["how-it-works", "How it works"],
+  ["usd", "Pay in dollars (Supra)"],
   ["indexer", "The indexer"],
   ["run-indexer", "Run the indexer"],
   ["api", "Indexer API"],
@@ -125,8 +126,8 @@ const Docs = () => (
             ],
             ["EVM address", <code key="a">{LIVE_CONTRACT.evmAddress}</code>],
             ["Network", LIVE_CONTRACT.network],
-            ["Contract tests", "28 Forge tests, offline, against a mock Schedule Service"],
-            ["Indexer tests", "16 unit and 12 end-to-end tests against a fake mirror node"],
+            ["Contract tests", "47 Forge tests, offline, against a mock Schedule Service and a mock Supra oracle"],
+            ["Indexer tests", "18 unit and 16 end-to-end tests against a fake mirror node"],
           ]}
         />
         <Table
@@ -143,6 +144,12 @@ const Docs = () => (
             </div>,
           ])}
         />
+        <Note>
+          <strong>USD plans are not yet proven live.</strong> The transactions above were made against the previous
+          build of the contract, before USD plans existed; the fixed-HBAR path they exercise is unchanged. USD plans and
+          the Supra integration are covered by the contract tests and by checks of Supra&apos;s live testnet contract
+          (see <a href="#usd">Pay in dollars</a>), but a live USD run is still to be recorded.
+        </Note>
         <Note>
           <strong>The indexer is not hosted.</strong> It is a process you run on your own machine, so the dashboard
           shows &quot;Cannot reach the indexer&quot; until you start it (see <a href="#run-indexer">Run the indexer</a>
@@ -251,6 +258,64 @@ yarn next:dev           # terminal 2, then open http://localhost:3000`}</Code>
         </Note>
       </Section>
 
+      <Section id="usd" title="Pay in dollars (Supra)">
+        <P>
+          <code>createUsdPlan</code> takes a dollar amount instead of an HBAR amount. At every run the contract reads
+          the HBAR/USD price from <A href="https://docs.supra.com/oracles/data-feeds/data-feeds-index">Supra</A> and
+          pays <code>usdPerRun ÷ price</code>. The oracle is load-bearing: the schedule fires with nobody online, so the
+          price has to be read on-chain, inside the same call that pays.
+        </P>
+        <Code>{`createUsdPlan(recipient, usdPerRun, maxHbarPerRun, feeReservePerRun, intervalSeconds, runs)
+//   usdPerRun      8 decimals (1e8 = $1)
+//   maxHbarPerRun  tinybar, escrowed per run as the cap
+//   escrow         (maxHbarPerRun + feeReservePerRun) × runs`}</Code>
+        <Table
+          head={["Detail", "How it works"]}
+          rows={[
+            [
+              "Conversion",
+              "tinybar = usd × 10^decimals ÷ price. Supra prices have 18 decimals and the contract reads the decimals from the feed.",
+            ],
+            [
+              "The cap",
+              "The owner escrows a per-run HBAR cap so the contract always holds enough. The create form suggests twice today's conversion.",
+            ],
+            [
+              "Surplus",
+              "What a run does not need (cap minus payout) accrues on the plan. The owner takes it with claimSurplus(planId); cancel pays out what is left.",
+            ],
+            [
+              "Never a wrong amount",
+              "A run is rejected, not approximated, if the oracle call reverts, the price is zero or stale (older than MAX_PRICE_AGE, default 3600 s), or the payout would exceed the cap. The plan pauses and emits PriceRejected with the reason.",
+            ],
+            [
+              "Preview",
+              "quoteUsd(usdPerRun) is a view returning the payout, the price, when it was published, and a problem code. The create form calls it live.",
+            ],
+          ]}
+        />
+        <Table
+          head={["Network", "Supra storage contract", "HBAR/USD pair"]}
+          rows={[
+            ["Testnet", <code key="t">0x6Cd59830AAD978446e6cc7f6cc173aF7656Fb917</code>, "432"],
+            ["Mainnet", <code key="m">0xD02cc7a670047b6b012556A88e275c685d25e0c9</code>, "432"],
+          ]}
+        />
+        <Note>
+          <strong>Check the freshness window for your use.</strong> On testnet the price&apos;s publish timestamp did
+          not change over the roughly 20 minutes it was observed, so the testnet update cadence is slow and
+          undocumented. A price older than the window pauses the plan on purpose. Mainnet is untested.
+        </Note>
+        <P>
+          In the dashboard, use the <strong>USD (Supra price)</strong> tab on the create form. From the command line,
+          see the{" "}
+          <A href="https://github.com/Godbrand0/scaffold-hbar-schedule-ledger/blob/main/docs/GETTING-STARTED.md">
+            getting-started guide
+          </A>
+          .
+        </P>
+      </Section>
+
       <Section id="indexer" title="The indexer">
         <P>
           The contract can only report what happens <em>inside</em> it. Some failures happen outside it: the network
@@ -267,7 +332,8 @@ yarn next:dev           # terminal 2, then open http://localhost:3000`}</Code>
             <strong>Reads contract events.</strong> It pulls the contract&apos;s logs from the mirror node and decodes{" "}
             <code>PlanCreated</code>, <code>ScheduleBooked</code>, <code>PaymentExecuted</code>,{" "}
             <code>PaymentFailed</code>, <code>PlanResumed</code>, <code>PlanCompleted</code> and{" "}
-            <code>PlanCancelled</code> into plan state.
+            <code>PlanCancelled</code>, plus <code>PriceRejected</code> and <code>SurplusClaimed</code> for USD plans,
+            into plan state.
           </li>
           <li>
             <strong>Checks every booked schedule.</strong> For each schedule the contract booked, it asks the mirror
@@ -415,8 +481,8 @@ curl -s http://127.0.0.1:4000/plans`}</Code>
             ],
             [
               <code key="2">paused</code>,
-              "The recipient rejected a payment",
-              "Fix the recipient, then the owner calls resume(planId)",
+              "The recipient rejected a payment, or a USD plan could not price the run (stale or missing Supra price, or over the cap)",
+              "Fix the recipient or wait for a healthy price, then the owner calls resume(planId)",
             ],
             [
               <code key="3">INSUFFICIENT_PAYER_BALANCE</code>,

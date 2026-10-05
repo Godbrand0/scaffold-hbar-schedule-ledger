@@ -56,6 +56,7 @@ fn plan_created(ts: &str) -> Value {
             owner: OWNER,
             recipient: RECIPIENT,
             amountPerRun: U256::from(500),
+            usdPerRun: U256::from(0),
             feeReservePerRun: U256::from(250),
             intervalSeconds: 3600,
             totalRuns: 3,
@@ -216,6 +217,7 @@ async fn follows_a_plan_from_creation_to_a_successful_run() {
     assert_eq!(plan["status"], "active");
     assert_eq!(plan["amountPerRun"], "500");
     assert_eq!(plan["feeReservePerRun"], "250");
+    assert_eq!(plan["usdPerRun"], "0");
     assert_eq!(plan["schedules"][0]["status"], "pending");
     assert_eq!(plan["schedules"][0]["scheduleId"], "0.0.1000");
 
@@ -230,6 +232,7 @@ async fn follows_a_plan_from_creation_to_a_successful_run() {
             runIndex: 1,
             recipient: RECIPIENT,
             amount: U256::from(500),
+            hbarUsdPrice: U256::from(0),
         },
     )]);
     let report = h.sync().await;
@@ -463,4 +466,150 @@ async fn an_underfunded_payer_failure_is_surfaced_even_though_the_contract_emits
     assert_eq!(plan["completedRuns"], 0);
     assert_eq!(plan["schedules"][0]["result"], "INSUFFICIENT_PAYER_BALANCE");
     assert_eq!(plan["needsAttention"], true);
+}
+
+fn usd_plan_created(ts: &str) -> Value {
+    log(
+        ts,
+        0,
+        &PlanCreated {
+            planId: U256::from(1),
+            owner: OWNER,
+            recipient: RECIPIENT,
+            amountPerRun: U256::from(15_000_000_000u64),
+            usdPerRun: U256::from(1_000_000_000u64),
+            feeReservePerRun: U256::from(170_000_000u64),
+            intervalSeconds: 60,
+            totalRuns: 2,
+        },
+    )
+}
+
+/// What the contract emits when a USD plan cannot price a run: `PriceRejected`, then `PaymentFailed` with amount 0.
+fn price_rejected_logs(ts: &str, problem: u8) -> Vec<Value> {
+    vec![
+        log(
+            ts,
+            0,
+            &PriceRejected {
+                planId: U256::from(1),
+                runIndex: 1,
+                problem,
+                price: U256::from(103_310_000_000_000_000u64),
+                updatedAtMs: U256::from(1_000u64),
+            },
+        ),
+        log(
+            ts,
+            1,
+            &PaymentFailed {
+                planId: U256::from(1),
+                runIndex: 1,
+                recipient: RECIPIENT,
+                amount: U256::from(0),
+            },
+        ),
+    ]
+}
+
+#[tokio::test]
+async fn a_usd_plan_exposes_its_dollar_amount_and_the_price_each_payout_used() {
+    let h = Harness::new().await;
+    h.push_logs(vec![
+        usd_plan_created("2000.000000001"),
+        booked("2000.000000001", 1, 9_000_000_000),
+    ]);
+    h.set_schedule("0.0.1000", false, None);
+    h.sync().await;
+    h.push_logs(vec![log(
+        "3000.000000001",
+        0,
+        &PaymentExecuted {
+            planId: U256::from(1),
+            runIndex: 1,
+            recipient: RECIPIENT,
+            amount: U256::from(9_680_000_000u64),
+            hbarUsdPrice: U256::from(103_310_000_000_000_000u64),
+        },
+    )]);
+    h.sync().await;
+
+    let (_, plan) = h.get("/plans/1").await;
+    assert_eq!(plan["usdPerRun"], "1000000000");
+    assert_eq!(plan["completedRuns"], 1);
+    let (_, events) = h.get("/events?planId=1").await;
+    let paid = events["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["kind"] == "PaymentExecuted")
+        .unwrap();
+    assert_eq!(paid["data"]["amount"], "9680000000");
+    assert_eq!(paid["data"]["hbarUsdPrice"], "103310000000000000");
+}
+
+#[tokio::test]
+async fn a_price_rejection_pauses_the_plan_and_says_why_not_that_the_recipient_rejected() {
+    let h = Harness::new().await;
+    h.push_logs(vec![
+        usd_plan_created("2000.000000001"),
+        booked("2000.000000001", 1, 9_000_000_000),
+    ]);
+    h.set_schedule("0.0.1000", false, None);
+    h.sync().await;
+    h.push_logs(price_rejected_logs("4000.000000001", 3));
+    h.sync().await;
+
+    let (_, plan) = h.get("/plans/1").await;
+    assert_eq!(plan["status"], "paused");
+    assert_eq!(plan["needsAttention"], true);
+    let reason = plan["lastError"].as_str().unwrap();
+    assert!(
+        reason.contains("Supra") && reason.contains("stale"),
+        "unexpected reason: {reason}"
+    );
+    assert!(!reason.contains("recipient"), "must not blame the recipient: {reason}");
+}
+
+#[tokio::test]
+async fn every_price_problem_gets_its_own_explanation() {
+    let expected = [
+        (1u8, "oracle call failed"),
+        (2, "no usable price"),
+        (3, "stale"),
+        (4, "exceed the per-run cap"),
+    ];
+    for (problem, fragment) in expected {
+        let h = Harness::new().await;
+        h.push_logs(vec![
+            usd_plan_created("2000.000000001"),
+            booked("2000.000000001", 1, 9_000_000_000),
+        ]);
+        h.set_schedule("0.0.1000", false, None);
+        h.sync().await;
+        h.push_logs(price_rejected_logs("4000.000000001", problem));
+        h.sync().await;
+        let (_, plan) = h.get("/plans/1").await;
+        let reason = plan["lastError"].as_str().unwrap().to_string();
+        assert!(reason.contains(fragment), "problem {problem}: {reason}");
+    }
+}
+
+#[tokio::test]
+async fn resuming_after_a_price_rejection_clears_the_reason() {
+    let h = Harness::new().await;
+    h.push_logs(vec![
+        usd_plan_created("2000.000000001"),
+        booked("2000.000000001", 1, 9_000_000_000),
+    ]);
+    h.set_schedule("0.0.1000", false, None);
+    h.sync().await;
+    h.push_logs(price_rejected_logs("4000.000000001", 3));
+    h.sync().await;
+    h.push_logs(vec![log("5000.000000001", 0, &PlanResumed { planId: U256::from(1) })]);
+    h.sync().await;
+
+    let (_, plan) = h.get("/plans/1").await;
+    assert_eq!(plan["status"], "active");
+    assert_eq!(plan["lastError"], Value::Null);
 }

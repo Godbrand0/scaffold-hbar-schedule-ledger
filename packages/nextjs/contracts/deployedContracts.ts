@@ -11,6 +11,27 @@ const deployedContracts = {
       address: "0x0000000000000000000000000000000000000000",
       abi: [
         {
+          type: "constructor",
+          inputs: [
+            {
+              name: "priceFeed",
+              type: "address",
+              internalType: "contract ISupraSValueFeed",
+            },
+            {
+              name: "hbarUsdPair",
+              type: "uint256",
+              internalType: "uint256",
+            },
+            {
+              name: "maxPriceAge",
+              type: "uint256",
+              internalType: "uint256",
+            },
+          ],
+          stateMutability: "nonpayable",
+        },
+        {
           type: "function",
           name: "CAPACITY_PROBES",
           inputs: [],
@@ -39,6 +60,45 @@ const deployedContracts = {
         {
           type: "function",
           name: "DUE_TOLERANCE_SECONDS",
+          inputs: [],
+          outputs: [
+            {
+              name: "",
+              type: "uint256",
+              internalType: "uint256",
+            },
+          ],
+          stateMutability: "view",
+        },
+        {
+          type: "function",
+          name: "HBAR_USD_PAIR",
+          inputs: [],
+          outputs: [
+            {
+              name: "",
+              type: "uint256",
+              internalType: "uint256",
+            },
+          ],
+          stateMutability: "view",
+        },
+        {
+          type: "function",
+          name: "MAX_ORACLE_DECIMALS",
+          inputs: [],
+          outputs: [
+            {
+              name: "",
+              type: "uint256",
+              internalType: "uint256",
+            },
+          ],
+          stateMutability: "view",
+        },
+        {
+          type: "function",
+          name: "MAX_PRICE_AGE",
           inputs: [],
           outputs: [
             {
@@ -90,7 +150,33 @@ const deployedContracts = {
         },
         {
           type: "function",
+          name: "PRICE_FEED",
+          inputs: [],
+          outputs: [
+            {
+              name: "",
+              type: "address",
+              internalType: "contract ISupraSValueFeed",
+            },
+          ],
+          stateMutability: "view",
+        },
+        {
+          type: "function",
           name: "RUN_GAS_LIMIT",
+          inputs: [],
+          outputs: [
+            {
+              name: "",
+              type: "uint256",
+              internalType: "uint256",
+            },
+          ],
+          stateMutability: "view",
+        },
+        {
+          type: "function",
+          name: "USD_DECIMALS",
           inputs: [],
           outputs: [
             {
@@ -116,6 +202,19 @@ const deployedContracts = {
         },
         {
           type: "function",
+          name: "claimSurplus",
+          inputs: [
+            {
+              name: "planId",
+              type: "uint256",
+              internalType: "uint256",
+            },
+          ],
+          outputs: [],
+          stateMutability: "nonpayable",
+        },
+        {
+          type: "function",
           name: "createPlan",
           inputs: [
             {
@@ -125,6 +224,50 @@ const deployedContracts = {
             },
             {
               name: "amountPerRun",
+              type: "uint256",
+              internalType: "uint256",
+            },
+            {
+              name: "feeReservePerRun",
+              type: "uint256",
+              internalType: "uint256",
+            },
+            {
+              name: "intervalSeconds",
+              type: "uint32",
+              internalType: "uint32",
+            },
+            {
+              name: "runs",
+              type: "uint32",
+              internalType: "uint32",
+            },
+          ],
+          outputs: [
+            {
+              name: "planId",
+              type: "uint256",
+              internalType: "uint256",
+            },
+          ],
+          stateMutability: "payable",
+        },
+        {
+          type: "function",
+          name: "createUsdPlan",
+          inputs: [
+            {
+              name: "recipient",
+              type: "address",
+              internalType: "address payable",
+            },
+            {
+              name: "usdPerRun",
+              type: "uint256",
+              internalType: "uint256",
+            },
+            {
+              name: "maxHbarPerRun",
               type: "uint256",
               internalType: "uint256",
             },
@@ -198,7 +341,17 @@ const deployedContracts = {
                   internalType: "uint256",
                 },
                 {
+                  name: "usdPerRun",
+                  type: "uint256",
+                  internalType: "uint256",
+                },
+                {
                   name: "feeReservePerRun",
+                  type: "uint256",
+                  internalType: "uint256",
+                },
+                {
+                  name: "surplus",
                   type: "uint256",
                   internalType: "uint256",
                 },
@@ -246,6 +399,40 @@ const deployedContracts = {
               name: "",
               type: "uint256",
               internalType: "uint256",
+            },
+          ],
+          stateMutability: "view",
+        },
+        {
+          type: "function",
+          name: "quoteUsd",
+          inputs: [
+            {
+              name: "usdPerRun",
+              type: "uint256",
+              internalType: "uint256",
+            },
+          ],
+          outputs: [
+            {
+              name: "tinybar",
+              type: "uint256",
+              internalType: "uint256",
+            },
+            {
+              name: "price",
+              type: "uint256",
+              internalType: "uint256",
+            },
+            {
+              name: "updatedAtMs",
+              type: "uint256",
+              internalType: "uint256",
+            },
+            {
+              name: "problem",
+              type: "uint8",
+              internalType: "enum RecurringPayments.PriceProblem",
             },
           ],
           stateMutability: "view",
@@ -300,6 +487,12 @@ const deployedContracts = {
             },
             {
               name: "amount",
+              type: "uint256",
+              indexed: false,
+              internalType: "uint256",
+            },
+            {
+              name: "hbarUsdPrice",
               type: "uint256",
               indexed: false,
               internalType: "uint256",
@@ -399,6 +592,12 @@ const deployedContracts = {
               internalType: "uint256",
             },
             {
+              name: "usdPerRun",
+              type: "uint256",
+              indexed: false,
+              internalType: "uint256",
+            },
+            {
               name: "feeReservePerRun",
               type: "uint256",
               indexed: false,
@@ -427,6 +626,43 @@ const deployedContracts = {
               name: "planId",
               type: "uint256",
               indexed: true,
+              internalType: "uint256",
+            },
+          ],
+          anonymous: false,
+        },
+        {
+          type: "event",
+          name: "PriceRejected",
+          inputs: [
+            {
+              name: "planId",
+              type: "uint256",
+              indexed: true,
+              internalType: "uint256",
+            },
+            {
+              name: "runIndex",
+              type: "uint32",
+              indexed: false,
+              internalType: "uint32",
+            },
+            {
+              name: "problem",
+              type: "uint8",
+              indexed: false,
+              internalType: "enum RecurringPayments.PriceProblem",
+            },
+            {
+              name: "price",
+              type: "uint256",
+              indexed: false,
+              internalType: "uint256",
+            },
+            {
+              name: "updatedAtMs",
+              type: "uint256",
+              indexed: false,
               internalType: "uint256",
             },
           ],
@@ -495,6 +731,25 @@ const deployedContracts = {
           anonymous: false,
         },
         {
+          type: "event",
+          name: "SurplusClaimed",
+          inputs: [
+            {
+              name: "planId",
+              type: "uint256",
+              indexed: true,
+              internalType: "uint256",
+            },
+            {
+              name: "amount",
+              type: "uint256",
+              indexed: false,
+              internalType: "uint256",
+            },
+          ],
+          anonymous: false,
+        },
+        {
           type: "error",
           name: "InvalidAmount",
           inputs: [],
@@ -502,6 +757,11 @@ const deployedContracts = {
         {
           type: "error",
           name: "InvalidInterval",
+          inputs: [],
+        },
+        {
+          type: "error",
+          name: "InvalidOracle",
           inputs: [],
         },
         {
@@ -528,6 +788,11 @@ const deployedContracts = {
         {
           type: "error",
           name: "NotOwner",
+          inputs: [],
+        },
+        {
+          type: "error",
+          name: "NothingToClaim",
           inputs: [],
         },
         {

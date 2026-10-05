@@ -5,6 +5,8 @@ A [Scaffold-HBAR](https://docs.hedera.com/solutions/tools/scaffold-hbar) templat
 
 - A Solidity contract that escrows HBAR and pays itself out on a timer using the **Hedera Schedule Service**
   ([HIP-1215](https://hips.hedera.com/hip/hip-1215)), with no off-chain keeper.
+- **USD-denominated plans** ("pay $10 of HBAR every week") priced at every run by the **Supra** oracle, which is
+  what makes the dollar amount possible on a contract nobody is around to operate.
 - A **Rust indexer** that follows the contract through the mirror node and records what happened to every run,
   including runs that failed.
 - A **Next.js dashboard** that creates plans and shows their real status.
@@ -70,7 +72,7 @@ run fails with `INSUFFICIENT_PAYER_BALANCE` and the escrow is silently eaten by 
 | ----------------- | -------------------------------------------------------------- | --------------------------------------- |
 | `active`          | A run is booked and funds are escrowed                         | n/a                                     |
 | `needs_reschedule`| HSS refused to book the next run (`ScheduleFailed` event)       | anyone calls `rebook(planId)`           |
-| `paused`          | The recipient rejected a payment (`PaymentFailed` event)        | owner calls `resume(planId)`            |
+| `paused`          | The recipient rejected a payment (`PaymentFailed`), or a USD plan could not price the run (`PriceRejected`) | owner calls `resume(planId)` |
 | `completed`       | Every run paid                                                 | terminal                                |
 | `cancelled`       | Owner cancelled; unpaid escrow refunded                        | terminal                                |
 
@@ -81,6 +83,48 @@ due, so a missed schedule can always be nudged by hand; the amount and recipient
 up with one of `pending`, `executed`, `failed` (with the HAPI result code) or `deleted`. A plan is flagged
 `needsAttention` when it is `needs_reschedule`, `paused`, has a failed schedule, or has a booked run that is still
 unpaid well past its expiry (`overdue`).
+
+## Pay in dollars: the Supra oracle integration
+
+`createUsdPlan` takes a dollar amount instead of an HBAR amount. At every run the contract reads the HBAR/USD price
+from [Supra](https://docs.supra.com/oracles/data-feeds/data-feeds-index) and pays `usdPerRun / price`. Remove the
+oracle and the plan cannot work, because HBAR's price moves and nobody is online to reprice each run: the schedule
+fires on its own, so the price must be read on-chain, inside that same call.
+
+```
+ createUsdPlan(recipient, usdPerRun, maxHbarPerRun, fee, interval, runs)
+                │  escrows (maxHbarPerRun + fee) × runs
+                ▼
+   HSS fires executeRun ──▶ Supra storage.getSvalue(pair 432) ──▶ price, decimals, publish time (ms)
+                │
+                ├─ price fresh, payout ≤ cap ──▶ pay usd ÷ price, keep the unused cap as surplus
+                └─ stale / missing / over cap ──▶ emit PriceRejected + PaymentFailed, plan pauses
+```
+
+| Detail | How it works |
+| --- | --- |
+| **Units** | USD has 8 decimals (`1e8` = $1), the same scale as tinybar, so `tinybar = usd × 10^oracleDecimals / price`. Supra prices have 18 decimals; the contract reads the decimals from the feed rather than assuming. |
+| **The cap** | The owner escrows `maxHbarPerRun` per run, so the contract always holds enough. The dashboard suggests 2× today's conversion (a 50% price drop still pays). |
+| **Surplus** | What a run did not need (`cap − payout`) accrues on the plan. The owner takes it with `claimSurplus(planId)` at any time, and `cancel` pays out whatever is left. |
+| **Never a wrong amount** | A run is rejected, not approximated, when the oracle call reverts, the price is zero, the price is older than `MAX_PRICE_AGE` (default 3600 s), or the payout would exceed the cap. The plan pauses with a `PriceRejected` event naming the reason, and the owner resumes it once the price is healthy. |
+| **Preview** | `quoteUsd(usdPerRun)` is a view that returns the payout the next run would make, the price, its publish time and the problem if any. The dashboard calls it live. |
+| **Fixed-HBAR plans** | `createPlan` is unchanged and never touches the oracle. |
+
+**Where Supra lives on Hedera**
+
+| Network | Storage contract (what the contract reads) | HBAR/USD pair |
+| --- | --- | --- |
+| Testnet | `0x6Cd59830AAD978446e6cc7f6cc173aF7656Fb917` | 432 (HBAR_USDT is 75) |
+| Mainnet | `0xD02cc7a670047b6b012556A88e275c685d25e0c9` | 432 |
+
+`yarn foundry:deploy:testnet` passes these to the constructor. Override with `SUPRA_STORAGE`,
+`SUPRA_HBAR_USD_PAIR` and `MAX_PRICE_AGE_SECONDS` when you deploy.
+
+**Read this before relying on the freshness window.** On testnet the feed's publish timestamp did not change across
+the roughly 20 minutes I observed it, so Supra's testnet update cadence is slower than a mainnet feed should be and
+is not documented. A price older than `MAX_PRICE_AGE` pauses the plan by design. Pick the window for your use case:
+long enough that normal update gaps do not pause plans, short enough that a stale price cannot misprice a payment.
+Mainnet is untested.
 
 ## Quick start
 
@@ -93,7 +137,7 @@ and [Rust](https://rustup.rs) (only for the indexer).
 npm create scaffold-hbar@latest -- --template Godbrand0/scaffold-hbar-schedule-ledger my-app
 cd my-app
 
-yarn foundry:test                    # 28 contract tests, offline, mock Schedule Service
+yarn foundry:test                    # 47 contract tests, offline, mock Schedule Service and oracle
 yarn foundry:account:generate        # create a deployer keystore
 # fund the printed address at https://portal.hedera.com/faucet
 yarn foundry:deploy:testnet          # deploys RecurringPayments, regenerates the frontend ABI
@@ -128,6 +172,9 @@ the dashboard work without it, but the dashboard will have no data source.
 | `packages/nextjs/.env`      | `NEXT_PUBLIC_INDEXER_URL`     | `http://127.0.0.1:4000`                  | Where the dashboard reads plans from                 |
 |                             | `NEXT_PUBLIC_WALLET_CONNECT_PROJECT_ID` | bundled demo id                | WalletConnect                                        |
 | `packages/foundry/.env`     | `HEDERA_RPC_URL`              | `https://testnet.hashio.io/api`          | JSON-RPC endpoint                                    |
+| deploy-time (shell env)     | `SUPRA_STORAGE`               | Supra's address for the network          | Price storage contract the constructor reads         |
+|                             | `SUPRA_HBAR_USD_PAIR`         | `432`                                    | HBAR/USD pair index in that contract                 |
+|                             | `MAX_PRICE_AGE_SECONDS`       | `3600`                                   | A price older than this pauses USD plans             |
 
 ## Indexer API
 
@@ -149,7 +196,7 @@ The data is as fresh as the mirror node (a few seconds behind consensus) plus th
 ## Making it yours
 
 1. **Change the payout logic** in `packages/foundry/contracts/RecurringPayments.sol` (a different split, a token
-   instead of HBAR, a USD-denominated amount from an oracle, and so on).
+   instead of HBAR, another oracle pair such as HBAR_USDT, and so on). The Supra read is isolated in `quoteUsd`.
 2. **Keep or extend the events.** If you add or change an event, update three places together:
    the `sol!` block in `packages/indexer/src/events.rs`, the `LedgerEvent` enum and `apply_to_state` in
    `packages/indexer/src/store.rs`, and the dashboard types in `packages/nextjs/utils/schedule-ledger/indexer.ts`.
@@ -160,9 +207,9 @@ The data is as fresh as the mirror node (a few seconds behind consensus) plus th
 
 | Command                | What it runs                                                        | Needs network |
 | ---------------------- | ------------------------------------------------------------------- | ------------- |
-| `yarn foundry:test`    | 28 Forge tests incl. a fuzz test on escrow accounting                | no            |
-| `yarn indexer:test`    | 16 unit tests and 12 end-to-end tests against a fake mirror node     | no            |
-| `yarn next:test`       | 12 tests for HBAR unit conversion and attention logic                | no            |
+| `yarn foundry:test`    | 47 Forge tests incl. fuzz tests on escrow accounting and the USD payout cap | no     |
+| `yarn indexer:test`    | 18 unit tests and 16 end-to-end tests against a fake mirror node     | no            |
+| `yarn next:test`       | 16 tests for HBAR/USD unit conversion and attention logic            | no            |
 | `yarn test`            | all of the above                                                    | no            |
 | `cd packages/indexer && cargo test --test live_testnet -- --ignored` | Pins the mirror node response shapes against real testnet | yes |
 
@@ -204,6 +251,11 @@ not have found them.
 
 ## Testnet proof
 
+> **Which build this covers.** These transactions were made against the build before USD plans and the Supra
+> oracle were added. The fixed-HBAR path they exercise (`createPlan`, `executeRun`, `resume`, `cancel`) is unchanged.
+> A live USD plan run has not been recorded yet, so USD plans are covered by the 47 contract tests and by checks of
+> Supra's live testnet contract, not by a testnet execution.
+
 Deployed to Hedera testnet with `yarn foundry:deploy:testnet`; contract
 [`0.0.10861866`](https://hashscan.io/testnet/contract/0.0.10861866) (`0xFD70C4780318495fa11Ac6337c8125F041f6f302`). Everything below was
 indexed live by `packages/indexer` while it ran.
@@ -232,7 +284,9 @@ Earlier runs against previous builds of this contract are what exposed the findi
 - Fee reserve left over after the final run stays in the contract (fees are only known after the fact). Set the
   reserve close to `gasLimit × gasPrice`.
 - The recipient is fixed per plan. Plans pay HBAR only; for HTS tokens, replace the transfer in `executeRun`.
-- Mainnet is untested.
+- USD plans depend on Supra keeping its feed fresh. See the freshness note in the Supra section.
+- Mainnet is untested, including the Supra mainnet storage address.
+- An existing indexer database from an older version must be deleted to re-index (`plans` gained a column).
 
 ## License
 

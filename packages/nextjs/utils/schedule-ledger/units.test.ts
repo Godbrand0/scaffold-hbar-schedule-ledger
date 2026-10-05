@@ -1,4 +1,13 @@
-import { formatInterval, hbarToTinybar, tinybarToHbar, tinybarToWeibar } from "./units";
+import {
+  formatInterval,
+  formatOraclePrice,
+  formatUsd,
+  hbarToTinybar,
+  suggestedCapTinybar,
+  tinybarToHbar,
+  tinybarToWeibar,
+  usdToUnits,
+} from "./units";
 import { describe, expect, it } from "vitest";
 
 describe("hbarToTinybar", () => {
@@ -49,5 +58,33 @@ describe("formatInterval", () => {
     expect(formatInterval(3600)).toBe("1h");
     expect(formatInterval(5400)).toBe("1h 30m");
     expect(formatInterval(90_000)).toBe("1d 1h");
+  });
+});
+
+describe("USD helpers", () => {
+  it("parses dollars with the same 8-decimal scale as tinybar", () => {
+    expect(usdToUnits("10")).toBe(1_000_000_000n);
+    expect(usdToUnits("0.01")).toBe(1_000_000n);
+    expect(usdToUnits("0")).toBeNull();
+    expect(usdToUnits("$10")).toBeNull();
+  });
+
+  it("formats dollars with at least two decimals", () => {
+    expect(formatUsd(1_000_000_000n)).toBe("$10.00");
+    expect(formatUsd("1050000000")).toBe("$10.50");
+    expect(formatUsd(1n)).toBe("$0.00000001");
+  });
+
+  it("formats Supra's 18-decimal HBAR price", () => {
+    expect(formatOraclePrice(103_310_000_000_000_000n)).toBe("$0.1033");
+    expect(formatOraclePrice(2_500_000_000_000_000_000n)).toBe("$2.50");
+    expect(formatOraclePrice(10_000_000n, 8)).toBe("$0.10");
+  });
+
+  it("suggests a cap with headroom, rounded up to a whole HBAR", () => {
+    // $10 at $0.1033 is 96.80 HBAR; twice that is 193.6 HBAR, so the cap is 194 HBAR.
+    expect(suggestedCapTinybar(9_680_000_000n)).toBe(19_400_000_000n);
+    expect(suggestedCapTinybar(10_000_000_000n)).toBe(20_000_000_000n);
+    expect(suggestedCapTinybar(10_000_000_000n, 3n)).toBe(30_000_000_000n);
   });
 });

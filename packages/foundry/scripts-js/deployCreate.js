@@ -19,11 +19,24 @@ const network = process.env.RPC_URL;
 const account = process.env.ETH_KEYSTORE_ACCOUNT;
 
 const CHAIN_IDS = { hedera_testnet: 296, hedera_mainnet: 295 };
+// Supra's price storage contract on each network. HBAR/USD is pair 432. USD plans reject a price older than
+// MAX_PRICE_AGE_SECONDS. Override with SUPRA_STORAGE, SUPRA_HBAR_USD_PAIR and MAX_PRICE_AGE_SECONDS.
+const SUPRA_STORAGE = {
+  hedera_testnet: "0x6Cd59830AAD978446e6cc7f6cc173aF7656Fb917",
+  hedera_mainnet: "0xD02cc7a670047b6b012556A88e275c685d25e0c9",
+};
+const priceFeedArgs = [
+  process.env.SUPRA_STORAGE ?? SUPRA_STORAGE[network],
+  process.env.SUPRA_HBAR_USD_PAIR ?? "432",
+  process.env.MAX_PRICE_AGE_SECONDS ?? "3600",
+];
+
 const CONTRACTS = [
   {
     name: "RecurringPayments",
     source: "contracts/RecurringPayments.sol",
-    gasLimit: "3000000",
+    gasLimit: "3500000",
+    constructorArgs: priceFeedArgs,
   },
 ];
 
@@ -76,6 +89,10 @@ for (const contract of CONTRACTS) {
   ];
   if (process.env.ETH_PASSWORD_FILE)
     args.push("--password-file", process.env.ETH_PASSWORD_FILE);
+  // Last on purpose: --constructor-args takes every value up to the next flag, and keeping it at the end avoids it
+  // swallowing anything else.
+  if (contract.constructorArgs?.length)
+    args.push("--constructor-args", ...contract.constructorArgs);
 
   const output = run("forge", args, { capture: true });
   process.stdout.write(output);

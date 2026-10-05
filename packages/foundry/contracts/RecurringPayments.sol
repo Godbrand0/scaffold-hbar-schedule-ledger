@@ -3,6 +3,7 @@ pragma solidity ^0.8.28;
 
 import { ReentrancyGuard } from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import { IHederaScheduleService } from "./interfaces/IHederaScheduleService.sol";
+import { ISupraSValueFeed } from "./interfaces/ISupraSValueFeed.sol";
 
 /// @title RecurringPayments
 /// @notice Escrowed HBAR payments that pay themselves out on a schedule, using the Hedera Schedule Service.
@@ -21,7 +22,14 @@ import { IHederaScheduleService } from "./interfaces/IHederaScheduleService.sol"
 ///      indexer can show users what happened. HIP-1215 itself defines no events; everything an indexer needs
 ///      from the contract side is emitted here.
 ///
-///      All amounts are in tinybar, which is the unit the EVM sees in `msg.value` on Hedera (1 HBAR = 1e8).
+///      **USD-denominated plans** (`createUsdPlan`) pay a fixed dollar amount per run. At each run the contract reads
+///      the HBAR/USD price from Supra's oracle and pays `usdPerRun / price`. The owner escrows a per-run HBAR cap
+///      (`amountPerRun`), so the contract always holds enough. A run never pays a wrong amount: if the price is
+///      stale, missing, or would require more than the cap, the plan pauses with `PaymentFailed` and
+///      `PriceRejected` instead. The unused part of the cap accrues as a surplus the owner can claim.
+///
+///      All HBAR amounts are in tinybar, which is the unit the EVM sees in `msg.value` on Hedera (1 HBAR = 1e8).
+///      USD amounts use the same 8 decimals (1e8 = $1).
 contract RecurringPayments is ReentrancyGuard {
     enum Status {
         None,
@@ -35,8 +43,13 @@ contract RecurringPayments is ReentrancyGuard {
     struct Plan {
         address owner;
         address payable recipient;
+        /// @dev Tinybar paid per run. For USD plans this is the per-run cap and the escrowed amount.
         uint256 amountPerRun;
+        /// @dev USD per run with 8 decimals; 0 means a fixed-HBAR plan.
+        uint256 usdPerRun;
         uint256 feeReservePerRun;
+        /// @dev Escrowed HBAR from USD plans that was not needed because the price was favourable.
+        uint256 surplus;
         uint32 intervalSeconds;
         uint32 totalRuns;
         uint32 completedRuns;
@@ -59,6 +72,14 @@ contract RecurringPayments is ReentrancyGuard {
     ///      schedule's own call revert with `NotDue`. Runs may therefore start this many seconds early.
     uint256 public constant DUE_TOLERANCE_SECONDS = 10;
     uint32 public constant MIN_INTERVAL_SECONDS = 60;
+    uint256 public constant USD_DECIMALS = 8;
+    uint256 public constant MAX_ORACLE_DECIMALS = 30;
+
+    /// @notice Supra price storage contract and the pair index of HBAR/USD within it.
+    ISupraSValueFeed public immutable PRICE_FEED;
+    uint256 public immutable HBAR_USD_PAIR;
+    /// @notice A price older than this many seconds is rejected.
+    uint256 public immutable MAX_PRICE_AGE;
 
     uint256 public planCount;
     mapping(uint256 planId => Plan) internal plans;
@@ -68,18 +89,36 @@ contract RecurringPayments is ReentrancyGuard {
         address indexed owner,
         address indexed recipient,
         uint256 amountPerRun,
+        uint256 usdPerRun,
         uint256 feeReservePerRun,
         uint32 intervalSeconds,
         uint32 totalRuns
     );
     event ScheduleBooked(uint256 indexed planId, uint32 runIndex, address scheduleAddress, uint256 expirySecond);
     event ScheduleFailed(uint256 indexed planId, uint32 runIndex, int64 responseCode, uint256 expirySecond);
-    event PaymentExecuted(uint256 indexed planId, uint32 runIndex, address indexed recipient, uint256 amount);
+    /// @param hbarUsdPrice The oracle price used, in the oracle's decimals (18 for Supra). 0 for fixed-HBAR plans.
+    event PaymentExecuted(
+        uint256 indexed planId, uint32 runIndex, address indexed recipient, uint256 amount, uint256 hbarUsdPrice
+    );
     event PaymentFailed(uint256 indexed planId, uint32 runIndex, address indexed recipient, uint256 amount);
+    event PriceRejected(
+        uint256 indexed planId, uint32 runIndex, PriceProblem problem, uint256 price, uint256 updatedAtMs
+    );
+    event SurplusClaimed(uint256 indexed planId, uint256 amount);
     event PlanResumed(uint256 indexed planId);
     event PlanCompleted(uint256 indexed planId);
     event PlanCancelled(uint256 indexed planId, uint256 refunded);
 
+    /// @dev Why a USD plan could not price a run. Emitted in `PriceRejected`.
+    enum PriceProblem {
+        None,
+        OracleReverted,
+        ZeroPrice,
+        Stale,
+        AboveCap
+    }
+
+    error InvalidOracle();
     error InvalidRecipient();
     error InvalidAmount();
     error InvalidInterval();
@@ -90,12 +129,23 @@ contract RecurringPayments is ReentrancyGuard {
     error NotDue(uint64 nextRunAt);
     error WrongStatus(Status current);
     error RefundFailed();
+    error NothingToClaim();
 
-    /// @notice Escrow `(amountPerRun + feeReservePerRun) * runs` tinybar and start paying `recipient` every
-    ///         `intervalSeconds`.
+    /// @param priceFeed Supra price storage contract (see `ISupraSValueFeed`).
+    /// @param hbarUsdPair The HBAR/USD pair index in that contract (432 on Supra).
+    /// @param maxPriceAge Seconds after which a published price counts as stale.
+    constructor(ISupraSValueFeed priceFeed, uint256 hbarUsdPair, uint256 maxPriceAge) {
+        if (address(priceFeed) == address(0) || maxPriceAge == 0) revert InvalidOracle();
+        PRICE_FEED = priceFeed;
+        HBAR_USD_PAIR = hbarUsdPair;
+        MAX_PRICE_AGE = maxPriceAge;
+    }
+
+    /// @notice Escrow `(amountPerRun + feeReservePerRun) * runs` tinybar and start paying `recipient` a fixed
+    ///         `amountPerRun` every `intervalSeconds`.
     /// @dev `msg.value` must equal the full escrow. The first run is booked immediately. If HSS cannot book it,
     ///      the plan is still created in `NeedsReschedule` so the owner's funds are never stuck mid-creation.
-    ///      Booking costs roughly 1.6M gas, so send `createPlan` with an explicit gas limit of at least 2.5M.
+    ///      Booking costs roughly 1.6M gas, so send `createPlan` with an explicit gas limit of at least 2M.
     function createPlan(
         address payable recipient,
         uint256 amountPerRun,
@@ -103,8 +153,65 @@ contract RecurringPayments is ReentrancyGuard {
         uint32 intervalSeconds,
         uint32 runs
     ) external payable returns (uint256 planId) {
-        if (recipient == address(0) || recipient == address(this)) revert InvalidRecipient();
         if (amountPerRun == 0) revert InvalidAmount();
+        planId = _create(recipient, amountPerRun, 0, feeReservePerRun, intervalSeconds, runs);
+    }
+
+    /// @notice Like `createPlan`, but each run pays `usdPerRun` dollars of HBAR at the price Supra reports when the
+    ///         run executes. `maxHbarPerRun` is the cap that is escrowed per run.
+    /// @dev `usdPerRun` has 8 decimals (1e8 = $1). A run whose price is stale or unavailable, or whose payout would
+    ///      exceed `maxHbarPerRun`, pauses the plan rather than paying a wrong amount. Choose a cap with headroom
+    ///      (for example 2x the current conversion) so a price drop does not pause the plan. Escrow is
+    ///      `(maxHbarPerRun + feeReservePerRun) * runs`, same as `createPlan`.
+    function createUsdPlan(
+        address payable recipient,
+        uint256 usdPerRun,
+        uint256 maxHbarPerRun,
+        uint256 feeReservePerRun,
+        uint32 intervalSeconds,
+        uint32 runs
+    ) external payable returns (uint256 planId) {
+        if (usdPerRun == 0 || maxHbarPerRun == 0) revert InvalidAmount();
+        planId = _create(recipient, maxHbarPerRun, usdPerRun, feeReservePerRun, intervalSeconds, runs);
+    }
+
+    /// @notice The HBAR a USD plan would pay for one run right now, and the price it is based on.
+    /// @return tinybar The payout, or 0 when the price cannot be used.
+    /// @return price The oracle price (oracle decimals), 0 if unavailable.
+    /// @return updatedAtMs When the oracle published that price, in unix milliseconds.
+    /// @return problem `None` when `tinybar` is usable, otherwise why the price was rejected.
+    function quoteUsd(uint256 usdPerRun)
+        public
+        view
+        returns (uint256 tinybar, uint256 price, uint256 updatedAtMs, PriceProblem problem)
+    {
+        ISupraSValueFeed.PriceFeed memory feed;
+        try PRICE_FEED.getSvalue(HBAR_USD_PAIR) returns (ISupraSValueFeed.PriceFeed memory f) {
+            feed = f;
+        } catch {
+            return (0, 0, 0, PriceProblem.OracleReverted);
+        }
+        if (feed.price == 0 || feed.decimals > MAX_ORACLE_DECIMALS) {
+            return (0, 0, feed.time, PriceProblem.ZeroPrice);
+        }
+        // `feed.time` is in milliseconds. A timestamp slightly in the future (clock skew) counts as fresh.
+        uint256 nowMs = block.timestamp * 1000;
+        if (nowMs > feed.time && (nowMs - feed.time) / 1000 > MAX_PRICE_AGE) {
+            return (0, feed.price, feed.time, PriceProblem.Stale);
+        }
+        // usd (1e8 = $1) and tinybar (1e8 = 1 HBAR) share a scale, so tinybar = usd / (usd per HBAR).
+        return (usdPerRun * 10 ** feed.decimals / feed.price, feed.price, feed.time, PriceProblem.None);
+    }
+
+    function _create(
+        address payable recipient,
+        uint256 amountPerRun,
+        uint256 usdPerRun,
+        uint256 feeReservePerRun,
+        uint32 intervalSeconds,
+        uint32 runs
+    ) internal returns (uint256 planId) {
+        if (recipient == address(0) || recipient == address(this)) revert InvalidRecipient();
         if (intervalSeconds < MIN_INTERVAL_SECONDS) revert InvalidInterval();
         if (runs == 0) revert InvalidRuns();
 
@@ -116,7 +223,9 @@ contract RecurringPayments is ReentrancyGuard {
             owner: msg.sender,
             recipient: recipient,
             amountPerRun: amountPerRun,
+            usdPerRun: usdPerRun,
             feeReservePerRun: feeReservePerRun,
+            surplus: 0,
             intervalSeconds: intervalSeconds,
             totalRuns: runs,
             completedRuns: 0,
@@ -125,7 +234,9 @@ contract RecurringPayments is ReentrancyGuard {
             status: Status.Active
         });
 
-        emit PlanCreated(planId, msg.sender, recipient, amountPerRun, feeReservePerRun, intervalSeconds, runs);
+        emit PlanCreated(
+            planId, msg.sender, recipient, amountPerRun, usdPerRun, feeReservePerRun, intervalSeconds, runs
+        );
         _book(planId);
     }
 
@@ -142,15 +253,35 @@ contract RecurringPayments is ReentrancyGuard {
         uint32 runIndex = plan.completedRuns + 1;
         plan.scheduleAddress = address(0);
 
-        (bool ok,) = plan.recipient.call{ value: plan.amountPerRun, gas: PAYMENT_GAS_LIMIT }("");
+        uint256 amount = plan.amountPerRun;
+        uint256 price;
+        if (plan.usdPerRun != 0) {
+            PriceProblem problem;
+            uint256 updatedAtMs;
+            (amount, price, updatedAtMs, problem) = quoteUsd(plan.usdPerRun);
+            if (problem == PriceProblem.None && amount > plan.amountPerRun) {
+                problem = PriceProblem.AboveCap;
+                amount = 0;
+            }
+            if (problem != PriceProblem.None || amount == 0) {
+                if (problem == PriceProblem.None) problem = PriceProblem.ZeroPrice; // payout rounded down to nothing
+                plan.status = Status.Paused;
+                emit PriceRejected(planId, runIndex, problem, price, updatedAtMs);
+                emit PaymentFailed(planId, runIndex, plan.recipient, 0);
+                return;
+            }
+        }
+
+        (bool ok,) = plan.recipient.call{ value: amount, gas: PAYMENT_GAS_LIMIT }("");
         if (!ok) {
             plan.status = Status.Paused;
-            emit PaymentFailed(planId, runIndex, plan.recipient, plan.amountPerRun);
+            emit PaymentFailed(planId, runIndex, plan.recipient, amount);
             return;
         }
 
         plan.completedRuns = runIndex;
-        emit PaymentExecuted(planId, runIndex, plan.recipient, plan.amountPerRun);
+        plan.surplus += plan.amountPerRun - amount;
+        emit PaymentExecuted(planId, runIndex, plan.recipient, amount, price);
 
         if (runIndex == plan.totalRuns) {
             plan.status = Status.Completed;
@@ -202,10 +333,26 @@ contract RecurringPayments is ReentrancyGuard {
             HSS.deleteSchedule(scheduleAddress);
         }
 
-        uint256 refund = (plan.amountPerRun + plan.feeReservePerRun) * (plan.totalRuns - plan.completedRuns);
+        uint256 refund =
+            (plan.amountPerRun + plan.feeReservePerRun) * (plan.totalRuns - plan.completedRuns) + plan.surplus;
+        plan.surplus = 0;
         emit PlanCancelled(planId, refund);
 
         (bool ok,) = payable(plan.owner).call{ value: refund }("");
+        if (!ok) revert RefundFailed();
+    }
+
+    /// @notice Send the owner the escrow that USD runs did not need (the cap minus what each run actually paid).
+    /// @dev Works at any time, including after the plan completed. `cancel` pays out any remaining surplus too.
+    function claimSurplus(uint256 planId) external nonReentrant {
+        Plan storage plan = _plan(planId);
+        if (msg.sender != plan.owner) revert NotOwner();
+        uint256 amount = plan.surplus;
+        if (amount == 0) revert NothingToClaim();
+
+        plan.surplus = 0;
+        emit SurplusClaimed(planId, amount);
+        (bool ok,) = payable(plan.owner).call{ value: amount }("");
         if (!ok) revert RefundFailed();
     }
 

@@ -1,6 +1,6 @@
 {
   "name": "schedule-ledger",
-  "description": "Recurring HBAR payments on the Hedera Schedule Service (HIP-1215) with a Rust mirror-node indexer that tracks every run, including failures.",
+  "description": "Recurring HBAR payments on the Hedera Schedule Service (HIP-1215), optionally priced in USD by the Supra oracle, with a Rust mirror-node indexer that tracks every run, including failures.",
   "create-scaffold-hbar": {
     "capabilities": {
       "frontend": ["nextjs-app"],
