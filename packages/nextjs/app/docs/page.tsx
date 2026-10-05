@@ -454,9 +454,12 @@ curl -s http://127.0.0.1:4000/plans`}</Code>
         </P>
         <ul className="m-0 flex flex-col gap-2 pl-5">
           <li>
-            <strong>Create a plan.</strong> Enter the recipient, HBAR per run, the fee reserve per run, the interval in
-            seconds (at least 60) and the number of runs. The form shows the total you escrow. Creating a plan books a
-            schedule, so it sends an explicit 2,000,000 gas limit.
+            <strong>Create a plan.</strong> The form has two tabs. <em>Fixed HBAR</em> pays the same HBAR amount every
+            run. <em>USD (Supra price)</em> pays a dollar amount: enter USD per run and a max HBAR per run (the escrowed
+            cap). The form calls <code>quoteUsd</code> to show Supra&apos;s current price and what a run would pay now,
+            and suggests a cap of twice that. Both tabs take the recipient, a fee reserve per run (suggested 2.3 HBAR),
+            the interval in seconds (at least 60) and the number of runs, and show the total you escrow. Creating a plan
+            books a schedule, so it sends an explicit 2,000,000 gas limit.
           </li>
           <li>
             <strong>Watch a plan.</strong> Each card shows its status, progress, and every schedule with the
@@ -464,10 +467,19 @@ curl -s http://127.0.0.1:4000/plans`}</Code>
           </li>
           <li>
             <strong>Act on a plan.</strong> Buttons appear only when they apply: re-book, resume (owner only) and cancel
-            (owner only).
+            (owner only). On a USD plan the owner also sees an <em>Unused cap you can claim back</em> row with a{" "}
+            <strong>Claim surplus</strong> button whenever runs have paid less than the cap.
+          </li>
+          <li>
+            <strong>Read a paused USD plan.</strong> The warning on the card names the reason: the Supra price is stale
+            or missing, or the payout would exceed the cap. Resume once the price is healthy, or cancel and recreate
+            with a higher cap.
           </li>
         </ul>
-        <P>Amounts you type are in HBAR. The contract works in tinybar, and the dashboard converts for you.</P>
+        <P>
+          HBAR amounts you type are in HBAR and USD amounts in dollars. The contract works in tinybar and 8-decimal USD
+          units, and the dashboard converts for you.
+        </P>
       </Section>
 
       <Section id="troubleshooting" title="When something goes wrong">

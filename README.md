@@ -127,6 +127,17 @@ than `MAX_PRICE_AGE` pauses the plan by design. Pick the window for your use cas
 do not pause plans, short enough that a stale price cannot misprice a payment. Mainnet is untested, and its update
 rate is likely faster.
 
+## The dashboard
+
+`yarn next:dev` serves it at http://localhost:3000, with the full usage guide on its **Docs** page (`/docs`).
+
+- **Create form:** a *Fixed HBAR* tab and a *USD (Supra price)* tab. The USD tab calls `quoteUsd` to show Supra's
+  current price and today's payout, and suggests a per-run cap of twice that.
+- **Plan cards:** status, progress, every schedule with the network's result code, and a warning that names what is
+  wrong (a rejected recipient, a stale Supra price, a payout over the cap).
+- **Actions:** re-book (anyone), resume, cancel and **claim surplus** (owner only), each shown only when it applies.
+- Before the contract is deployed or while the indexer is down, it shows setup steps instead of failing.
+
 ## Quick start
 
 A longer walkthrough with expected output and troubleshooting is in [docs/GETTING-STARTED.md](docs/GETTING-STARTED.md).

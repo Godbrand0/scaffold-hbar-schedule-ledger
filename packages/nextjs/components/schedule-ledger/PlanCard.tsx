@@ -1,6 +1,6 @@
 "use client";
 
-import { useScaffoldWriteContract } from "~~/hooks/scaffold-hbar";
+import { useScaffoldReadContract, useScaffoldWriteContract } from "~~/hooks/scaffold-hbar";
 import { BOOKING_GAS_LIMIT } from "~~/utils/schedule-ledger/gas";
 import { PlanStatus, PlanView, attentionMessage } from "~~/utils/schedule-ledger/indexer";
 import { formatInterval, formatUsd, tinybarToHbar } from "~~/utils/schedule-ledger/units";
@@ -14,6 +14,33 @@ const STATUS_STYLE: Record<PlanStatus, string> = {
 };
 
 const hashscanSchedule = (id: string) => `https://hashscan.io/testnet/schedule/${id}`;
+
+/** USD plans escrow a per-run cap; what a run does not need accrues as surplus the owner can take back at any time. */
+const SurplusClaim = ({ planId, onChanged }: { planId: number; onChanged: () => void }) => {
+  const { data: onChain, refetch } = useScaffoldReadContract({
+    contractName: "RecurringPayments",
+    functionName: "getPlan",
+    args: [BigInt(planId)],
+  });
+  const { writeContractAsync, isMining } = useScaffoldWriteContract({ contractName: "RecurringPayments" });
+  const surplus = onChain?.surplus ?? 0n;
+  if (surplus === 0n) return null;
+
+  const claim = async () => {
+    await writeContractAsync({ functionName: "claimSurplus", args: [BigInt(planId)] });
+    void refetch();
+    onChanged();
+  };
+
+  return (
+    <div className="flex items-center justify-between gap-3 rounded-lg bg-base-200 p-3 text-sm">
+      <span>Unused cap you can claim back: {tinybarToHbar(surplus)} HBAR</span>
+      <button className="btn btn-sm" disabled={isMining} onClick={claim}>
+        Claim surplus
+      </button>
+    </div>
+  );
+};
 
 type PlanCardProps = {
   plan: PlanView;
@@ -91,6 +118,8 @@ export const PlanCard = ({ plan, isConnected, isOwner, onChanged }: PlanCardProp
             </ul>
           </details>
         )}
+
+        {isOwner && isUsd && <SurplusClaim planId={plan.planId} onChanged={onChanged} />}
 
         {isOwner && isOpen && (
           <div className="card-actions justify-end">
