@@ -106,7 +106,7 @@ fires on its own, so the price must be read on-chain, inside that same call.
 | **Units** | USD has 8 decimals (`1e8` = $1), the same scale as tinybar, so `tinybar = usd × 10^oracleDecimals / price`. Supra prices have 18 decimals; the contract reads the decimals from the feed rather than assuming. |
 | **The cap** | The owner escrows `maxHbarPerRun` per run, so the contract always holds enough. The dashboard suggests 2× today's conversion (a 50% price drop still pays). |
 | **Surplus** | What a run did not need (`cap − payout`) accrues on the plan. The owner takes it with `claimSurplus(planId)` at any time, and `cancel` pays out whatever is left. |
-| **Never a wrong amount** | A run is rejected, not approximated, when the oracle call reverts, the price is zero, the price is older than `MAX_PRICE_AGE` (default 3600 s), or the payout would exceed the cap. The plan pauses with a `PriceRejected` event naming the reason, and the owner resumes it once the price is healthy. |
+| **Never a wrong amount** | A run is rejected, not approximated, when the oracle call reverts, the price is zero, the price is older than `MAX_PRICE_AGE` (default 7200 s), or the payout would exceed the cap. The plan pauses with a `PriceRejected` event naming the reason, and the owner resumes it once the price is healthy. |
 | **Preview** | `quoteUsd(usdPerRun)` is a view that returns the payout the next run would make, the price, its publish time and the problem if any. The dashboard calls it live. |
 | **Fixed-HBAR plans** | `createPlan` is unchanged and never touches the oracle. |
 
@@ -120,11 +120,12 @@ fires on its own, so the price must be read on-chain, inside that same call.
 `yarn foundry:deploy:testnet` passes these to the constructor. Override with `SUPRA_STORAGE`,
 `SUPRA_HBAR_USD_PAIR` and `MAX_PRICE_AGE_SECONDS` when you deploy.
 
-**Read this before relying on the freshness window.** On testnet the feed's publish timestamp did not change across
-the roughly 20 minutes I observed it, so Supra's testnet update cadence is slower than a mainnet feed should be and
-is not documented. A price older than `MAX_PRICE_AGE` pauses the plan by design. Pick the window for your use case:
-long enough that normal update gaps do not pause plans, short enough that a stale price cannot misprice a payment.
-Mainnet is untested.
+**Read this before relying on the freshness window.** Supra's testnet HBAR/USD feed updates **about once an hour**
+(*measured*): its publish time went from 1791190979 to 1791194579, exactly 3600 s apart, and it did not change in
+between. A 1-hour window would therefore pause plans just before each update, so the default is 7200 s. A price older
+than `MAX_PRICE_AGE` pauses the plan by design. Pick the window for your use case: long enough that normal update gaps
+do not pause plans, short enough that a stale price cannot misprice a payment. Mainnet is untested, and its update
+rate is likely faster.
 
 ## Quick start
 
@@ -174,7 +175,7 @@ the dashboard work without it, but the dashboard will have no data source.
 | `packages/foundry/.env`     | `HEDERA_RPC_URL`              | `https://testnet.hashio.io/api`          | JSON-RPC endpoint                                    |
 | deploy-time (shell env)     | `SUPRA_STORAGE`               | Supra's address for the network          | Price storage contract the constructor reads         |
 |                             | `SUPRA_HBAR_USD_PAIR`         | `432`                                    | HBAR/USD pair index in that contract                 |
-|                             | `MAX_PRICE_AGE_SECONDS`       | `3600`                                   | A price older than this pauses USD plans             |
+|                             | `MAX_PRICE_AGE_SECONDS`       | `7200`                                   | A price older than this pauses USD plans             |
 
 ## Indexer API
 
@@ -257,31 +258,40 @@ not have found them.
 
 ## Testnet proof
 
-> **Which build this covers.** These transactions were made against the build before USD plans and the Supra
-> oracle were added. The fixed-HBAR path they exercise (`createPlan`, `executeRun`, `resume`, `cancel`) is unchanged.
-> A live USD plan run has not been recorded yet, so USD plans are covered by the 50 contract tests and by checks of
-> Supra's live testnet contract, not by a testnet execution.
+### USD plans priced by Supra (current contract)
 
-Deployed to Hedera testnet with `yarn foundry:deploy:testnet`; contract
-[`0.0.10861866`](https://hashscan.io/testnet/contract/0.0.10861866) (`0xFD70C4780318495fa11Ac6337c8125F041f6f302`). Everything below was
-indexed live by `packages/indexer` while it ran.
+Contract [`0.0.10870569`](https://hashscan.io/testnet/contract/0.0.10870569) (`0x9Ee5C37F59A2253faE009714B0d2723C57f29b26`), deployed with
+`yarn foundry:deploy:testnet` (tx [0x9a6945fc…](https://hashscan.io/testnet/transaction/0x9a6945fcc80e3e89b790fed7ecc074256db71a6e1332ff3942b991ebd1f59f91)), reading Supra's testnet storage contract for HBAR/USD.
+Everything below was indexed live by `packages/indexer`.
 
 | Scenario | What happened | Transactions |
 | --- | --- | --- |
-| **Chained runs, no keeper** (plan 1: 2 runs, 60 s apart) | Run 1 fired through HSS, paid the recipient and booked run 2 inside the same execution. Run 2 fired, paid and completed the plan. Both schedules ended `executed / SUCCESS`. | create [0xc8410ea2…](https://hashscan.io/testnet/transaction/0xc8410ea22c818f0cd47fc5a05b086942e52f4d778c480181fa8ad8c6d82a6ea1) · run 1 [0x8f162b67…](https://hashscan.io/testnet/transaction/0x8f162b6701b64e5fce5d3d173f5c5cba765d31216f518ca4b5c74204d6eebecc) ([0.0.10861887](https://hashscan.io/testnet/schedule/0.0.10861887)) · run 2 [0x586d5c96…](https://hashscan.io/testnet/transaction/0x586d5c964df8aba49a2f59d991343d13ca854d37e99c9e4af54b1836d3342d61) ([0.0.10861895](https://hashscan.io/testnet/schedule/0.0.10861895)) |
-| **Failure and recovery** (plan 2: recipient contract rejects funds) | The run fired and the contract emitted `PaymentFailed` instead of reverting. The plan paused and the indexer flagged `needsAttention` ("recipient rejected payment for run 1"). After the recipient accepted funds, `resume` re-booked the run, which paid exactly 0.1 HBAR and completed the plan. | create [0x730f01a4…](https://hashscan.io/testnet/transaction/0x730f01a469d7640fb3bde5ccb9177772672da13e2b415befd624122339b06245) · failed run [0x35cab11a…](https://hashscan.io/testnet/transaction/0x35cab11a53b2064770e322c4ecf2ed4c52b2679843994743e2d07cf95f79fd21) ([0.0.10861911](https://hashscan.io/testnet/schedule/0.0.10861911)) · resume [0xf3e11e3f…](https://hashscan.io/testnet/transaction/0xf3e11e3f57288ea716d7f2435856d577e26ad310b75c0d83ed9e2c9308cd8cd2) · paid run [0xde10243b…](https://hashscan.io/testnet/transaction/0xde10243bb68a926299c1d0c8bb2ebbb93bba43f979ce2adbad09f04a1bf376e8) ([0.0.10861929](https://hashscan.io/testnet/schedule/0.0.10861929)) |
-| **Cancel** (plan 3: first run one hour away) | `cancel` deleted the pending schedule (indexer status `deleted`) and refunded the full 3.6 HBAR escrow. | create [0x24108aab…](https://hashscan.io/testnet/transaction/0x24108aabbcf2f6a8f80c8207c933de03dcf950538281e33b6445b674fa2dbee3) · cancel [0xcd3fcb79…](https://hashscan.io/testnet/transaction/0xcd3fcb79f46e8eae4c31cb2aa7a11984375e23309fac4d01de133e1469845ca6) ([0.0.10861936](https://hashscan.io/testnet/schedule/0.0.10861936)) |
+| **USD plan, chained runs, brand-new recipient** (plan 1: $0.25 per run, 2 runs, 60 s apart, 5 HBAR cap) | Each run read Supra's price, **$0.1030 per HBAR**, and paid **2.42671325 HBAR** (`0.25 ÷ 0.1030`), recorded in the `PaymentExecuted` event with the price used. The recipient was a random address with no account; the first payout created account [`0.0.10870584`](https://hashscan.io/testnet/account/0.0.10870584) and the two payouts total exactly 4.8534265 HBAR. Run 1 booked run 2 itself. | create [0xe4e461a4…](https://hashscan.io/testnet/transaction/0xe4e461a453856d86150efb33f484514c0267326e2a7d848e425ed13c311258e0) · run 1 [0xb3b42674…](https://hashscan.io/testnet/transaction/0xb3b4267456c842b5ec76781053d4877781f2390f376937e33d9a48509368462a) ([0.0.10870573](https://hashscan.io/testnet/schedule/0.0.10870573)) · run 2 [0x56360682…](https://hashscan.io/testnet/transaction/0x563606822b233928c9b7da24536abbd0a91ce0b760a4d5008b6eaf7d7dd28478) ([0.0.10870585](https://hashscan.io/testnet/schedule/0.0.10870585)) |
+| **Surplus claim** (plan 1) | The cap is escrowed, so each run left `5 − 2.42671325` unused. `claimSurplus` returned all of it, **5.1465735 HBAR**, to the owner. | claim [0xf5eeeea4…](https://hashscan.io/testnet/transaction/0xf5eeeea4c3dac49d34d4d05940a7d8b613469576b0bc5ad9b6cdfa7aede54b10) |
+| **Price guard** (plan 2: $0.25 per run, cap deliberately 1 HBAR) | At Supra's price the payout (about 2.43 HBAR) exceeded the cap, so the run did **not** pay. It emitted `PriceRejected` (`AboveCap`, with the price and its publish time) and paused. The indexer reported "run 1 paused: the payout would exceed the per-run cap at price 103020000000000000". `cancel` then refunded the full 3.3 HBAR. | create [0xf7ef562b…](https://hashscan.io/testnet/transaction/0xf7ef562bf9427d0afdaa7cfe75b7c43b9595ef3485b8678b581a5c8c707ab9bc) · rejected run [0x74073321…](https://hashscan.io/testnet/transaction/0x7407332123ad67d3f7b4773738c7b109cfed5887eaf155ba4c1731029644ecbd) ([0.0.10870578](https://hashscan.io/testnet/schedule/0.0.10870578)) · cancel [0xe7ba4ff1…](https://hashscan.io/testnet/transaction/0xe7ba4ff1614acf5b5f12c9806a1d9b05ac5df8f1e1affe481a567ae96385f6d1) |
 
-Deployment transaction: [0xce5c8093…](https://hashscan.io/testnet/transaction/0xce5c8093a89afe35608fed0cde60ed04a5d249f7c20bfc57410d8b98ccd28342). The recipient contract for
-plan 2 (`RejectingReceiver`, a test mock) is [`0.0.10861909`](https://hashscan.io/testnet/contract/0.0.10861909).
+This run is also what exposed the new-address gas problem described in
+[Hedera details](#hedera-details-worth-knowing): the first attempt, on the previous build, paused because paying a
+brand-new address needs about 650k gas.
 
-Earlier runs against previous builds of this contract are what exposed the findings in
-[Hedera details worth knowing](#hedera-details-worth-knowing): an `INSUFFICIENT_PAYER_BALANCE` failure and a
-`CONTRACT_REVERT_EXECUTED` (`NotDue`) failure, both detected by the indexer from the mirror node alone.
+### Fixed-HBAR plans (earlier contract build)
+
+Contract [`0.0.10861866`](https://hashscan.io/testnet/contract/0.0.10861866) (`0xFD70C4780318495fa11Ac6337c8125F041f6f302`), made before USD
+plans and the Supra oracle existed. The path it exercises (`createPlan`, `executeRun`, `resume`, `cancel`) is the same
+code; the gas limits were raised afterwards.
+
+| Scenario | What happened | Transactions |
+| --- | --- | --- |
+| **Chained runs, no keeper** (2 runs, 60 s apart) | Run 1 fired through HSS, paid the recipient and booked run 2 inside the same execution. Run 2 fired, paid and completed the plan. | create [0xc8410ea2…](https://hashscan.io/testnet/transaction/0xc8410ea22c818f0cd47fc5a05b086942e52f4d778c480181fa8ad8c6d82a6ea1) · run 1 [0x8f162b67…](https://hashscan.io/testnet/transaction/0x8f162b6701b64e5fce5d3d173f5c5cba765d31216f518ca4b5c74204d6eebecc) ([0.0.10861887](https://hashscan.io/testnet/schedule/0.0.10861887)) · run 2 [0x586d5c96…](https://hashscan.io/testnet/transaction/0x586d5c964df8aba49a2f59d991343d13ca854d37e99c9e4af54b1836d3342d61) ([0.0.10861895](https://hashscan.io/testnet/schedule/0.0.10861895)) |
+| **Failure and recovery** (recipient contract rejects funds) | The run emitted `PaymentFailed` instead of reverting and the plan paused. After the recipient accepted funds, `resume` re-booked the run, which paid exactly 0.1 HBAR. | create [0x730f01a4…](https://hashscan.io/testnet/transaction/0x730f01a469d7640fb3bde5ccb9177772672da13e2b415befd624122339b06245) · failed run [0x35cab11a…](https://hashscan.io/testnet/transaction/0x35cab11a53b2064770e322c4ecf2ed4c52b2679843994743e2d07cf95f79fd21) ([0.0.10861911](https://hashscan.io/testnet/schedule/0.0.10861911)) · resume [0xf3e11e3f…](https://hashscan.io/testnet/transaction/0xf3e11e3f57288ea716d7f2435856d577e26ad310b75c0d83ed9e2c9308cd8cd2) · paid run [0xde10243b…](https://hashscan.io/testnet/transaction/0xde10243bb68a926299c1d0c8bb2ebbb93bba43f979ce2adbad09f04a1bf376e8) ([0.0.10861929](https://hashscan.io/testnet/schedule/0.0.10861929)) |
+| **Cancel** (first run an hour away) | `cancel` deleted the pending schedule and refunded the full 3.6 HBAR escrow. | create [0x24108aab…](https://hashscan.io/testnet/transaction/0x24108aabbcf2f6a8f80c8207c933de03dcf950538281e33b6445b674fa2dbee3) · cancel [0xcd3fcb79…](https://hashscan.io/testnet/transaction/0xcd3fcb79f46e8eae4c31cb2aa7a11984375e23309fac4d01de133e1469845ca6) ([0.0.10861936](https://hashscan.io/testnet/schedule/0.0.10861936)) |
+
+Earlier builds also exposed an `INSUFFICIENT_PAYER_BALANCE` failure and a `CONTRACT_REVERT_EXECUTED` (`NotDue`)
+failure, both detected by the indexer from the mirror node alone.
 
 ## Status and limitations
 
-- **Testnet proof:** see the section above.
+- **Testnet proof:** see the section above, including a USD plan priced by Supra's live price.
 - Verified on the live testnet: the mirror node response shapes (live tests), contract booking through HIP-1215,
   scheduled execution, the tinybar `msg.value` behaviour, and the indexer detecting two real on-chain failures
   (`INSUFFICIENT_PAYER_BALANCE` and `CONTRACT_REVERT_EXECUTED`) that the contract itself could not report.
@@ -290,7 +300,8 @@ Earlier runs against previous builds of this contract are what exposed the findi
 - Fee reserve left over after the final run stays in the contract (fees are only known after the fact). Set the
   reserve close to `gasLimit × gasPrice`.
 - The recipient is fixed per plan. Plans pay HBAR only; for HTS tokens, replace the transfer in `executeRun`.
-- USD plans depend on Supra keeping its feed fresh. See the freshness note in the Supra section.
+- USD plans depend on Supra keeping its feed fresh (hourly on testnet). See the freshness note in the Supra section.
+- A USD plan's payout is as accurate as Supra's last update, which can be up to the update interval old.
 - Mainnet is untested, including the Supra mainnet storage address.
 - An existing indexer database from an older version must be deleted to re-index (`plans` gained a column).
 

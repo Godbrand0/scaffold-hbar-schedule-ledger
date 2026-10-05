@@ -145,10 +145,9 @@ const Docs = () => (
           ])}
         />
         <Note>
-          <strong>USD plans are not yet proven live.</strong> The transactions above were made against the previous
-          build of the contract, before USD plans existed; the fixed-HBAR path they exercise is unchanged. USD plans and
-          the Supra integration are covered by the contract tests and by checks of Supra&apos;s live testnet contract
-          (see <a href="#usd">Pay in dollars</a>), but a live USD run is still to be recorded.
+          <strong>Earlier proof.</strong> The earlier fixed-HBAR transactions (chained runs, failure and recovery,
+          cancel) were made on contract <A href={hashscanUrl("contract", "0.0.10861866")}>0.0.10861866</A>, before USD
+          plans existed. The table above is the current contract, which also covers the Supra USD path.
         </Note>
         <Note>
           <strong>The indexer is not hosted.</strong> It is a process you run on your own machine, so the dashboard
@@ -286,7 +285,7 @@ yarn next:dev           # terminal 2, then open http://localhost:3000`}</Code>
             ],
             [
               "Never a wrong amount",
-              "A run is rejected, not approximated, if the oracle call reverts, the price is zero or stale (older than MAX_PRICE_AGE, default 3600 s), or the payout would exceed the cap. The plan pauses and emits PriceRejected with the reason.",
+              "A run is rejected, not approximated, if the oracle call reverts, the price is zero or stale (older than MAX_PRICE_AGE, default 7200 s), or the payout would exceed the cap. The plan pauses and emits PriceRejected with the reason.",
             ],
             [
               "Preview",
@@ -302,9 +301,10 @@ yarn next:dev           # terminal 2, then open http://localhost:3000`}</Code>
           ]}
         />
         <Note>
-          <strong>Check the freshness window for your use.</strong> On testnet the price&apos;s publish timestamp did
-          not change over the roughly 20 minutes it was observed, so the testnet update cadence is slow and
-          undocumented. A price older than the window pauses the plan on purpose. Mainnet is untested.
+          <strong>Check the freshness window for your use.</strong> Supra&apos;s testnet HBAR/USD price updates about
+          once an hour (its publish time moved from 1791190979 to 1791194579, exactly 3600 s apart), so a 1-hour window
+          would pause plans just before each update and the default is 7200 s. A price older than the window pauses the
+          plan on purpose. Mainnet is untested.
         </Note>
         <P>
           In the dashboard, use the <strong>USD (Supra price)</strong> tab on the create form. From the command line,

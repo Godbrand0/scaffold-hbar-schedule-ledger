@@ -28,7 +28,7 @@ const SUPRA_STORAGE = {
 const priceFeedArgs = [
   process.env.SUPRA_STORAGE ?? SUPRA_STORAGE[network],
   process.env.SUPRA_HBAR_USD_PAIR ?? "432",
-  process.env.MAX_PRICE_AGE_SECONDS ?? "3600",
+  process.env.MAX_PRICE_AGE_SECONDS ?? "7200",
 ];
 
 const CONTRACTS = [

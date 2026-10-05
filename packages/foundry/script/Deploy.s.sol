@@ -15,7 +15,7 @@ contract DeployScript is ScaffoldETHDeploy {
         address feed = block.chainid == 295
             ? 0xD02cc7a670047b6b012556A88e275c685d25e0c9
             : 0x6Cd59830AAD978446e6cc7f6cc173aF7656Fb917;
-        RecurringPayments payments = new RecurringPayments(ISupraSValueFeed(feed), 432, 3600);
+        RecurringPayments payments = new RecurringPayments(ISupraSValueFeed(feed), 432, 7200);
         deployments.push(Deployment({ name: "RecurringPayments", addr: address(payments) }));
     }
 }
