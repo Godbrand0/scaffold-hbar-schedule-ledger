@@ -126,7 +126,7 @@ const Docs = () => (
             ],
             ["EVM address", <code key="a">{LIVE_CONTRACT.evmAddress}</code>],
             ["Network", LIVE_CONTRACT.network],
-            ["Contract tests", "47 Forge tests, offline, against a mock Schedule Service and a mock Supra oracle"],
+            ["Contract tests", "50 Forge tests, offline, against a mock Schedule Service and a mock Supra oracle"],
             ["Indexer tests", "18 unit and 16 end-to-end tests against a fake mirror node"],
           ]}
         />
@@ -254,7 +254,7 @@ yarn next:dev           # terminal 2, then open http://localhost:3000`}</Code>
           fees (mostly for booking the next run), and the network will not start a scheduled call unless the payer holds
           its gas limit times the gas price. Each plan therefore prepays <code>feeReservePerRun</code>. It is never paid
           to the recipient and is refunded only for runs that never fire. Without it, the run fails with{" "}
-          <code>INSUFFICIENT_PAYER_BALANCE</code> and the fees are lost. The dashboard suggests 1.7 HBAR per run.
+          <code>INSUFFICIENT_PAYER_BALANCE</code> and the fees are lost. The dashboard suggests 2.3 HBAR per run.
         </Note>
       </Section>
 
@@ -520,6 +520,11 @@ curl -s http://127.0.0.1:4000/plans`}</Code>
           <li>
             <strong>Booking is expensive.</strong> <code>createPlan</code>, <code>rebook</code> and <code>resume</code>{" "}
             each cost about 1.6M gas. Send them with an explicit gas limit of at least 1.85M.
+          </li>
+          <li>
+            <strong>Paying a brand-new address costs about 650k gas.</strong> The first payment to an address with no
+            account makes Hedera create the account inside the transfer, so a 100k payout limit failed. The payout limit
+            is now 800k and each scheduled run gets 2.6M gas.
           </li>
           <li>
             <strong>

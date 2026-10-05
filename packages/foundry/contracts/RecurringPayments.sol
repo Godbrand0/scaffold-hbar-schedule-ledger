@@ -11,7 +11,7 @@ import { ISupraSValueFeed } from "./interfaces/ISupraSValueFeed.sol";
 ///      contract books the next run through HSS (HIP-1215), so no off-chain keeper is needed.
 ///
 ///      **Network fees.** The payer of a contract-scheduled call is the contract itself. The network requires the
-///      payer to hold at least `gasLimit * gasPrice` when the call fires (about 1.7 HBAR for `RUN_GAS_LIMIT` at
+///      payer to hold at least `gasLimit * gasPrice` when the call fires (about 2.2 HBAR for `RUN_GAS_LIMIT` at
 ///      testnet prices) and then charges the gas actually used, mostly for booking the *next* run. Observed on
 ///      testnet: a run with too little balance fails with `INSUFFICIENT_PAYER_BALANCE` and still burns fees.
 ///      The per-run `feeReservePerRun` is therefore prepaid into the contract and is never paid to the recipient.
@@ -62,8 +62,16 @@ contract RecurringPayments is ReentrancyGuard {
     int64 internal constant HSS_SUCCESS = 22;
     /// @dev Reported in `ScheduleFailed` when no capacity probe succeeded (HSS was never asked to book).
     int64 public constant CAPACITY_UNAVAILABLE = -1;
-    uint256 public constant RUN_GAS_LIMIT = 2_000_000;
-    uint256 public constant PAYMENT_GAS_LIMIT = 100_000;
+    /// @dev Gas for one scheduled `executeRun`: the payout plus booking the next run. Booking costs about 1.45M gas
+    ///      and a payout to an *existing* account about 0.05M. Paying an address that has no account yet makes Hedera
+    ///      create one, which costs about 0.65M more (measured on testnet: 643,594 gas for one such transfer), so the
+    ///      first payment to a new address needs about 2.1M in total. 2.6M leaves headroom.
+    uint256 public constant RUN_GAS_LIMIT = 2_600_000;
+    /// @dev Gas forwarded to the recipient. 100k was too little: a transfer to a brand-new address reverted at
+    ///      100k, 200k, 400k and 600k gas and succeeded at 700k and above, because Hedera creates the account inside
+    ///      the call. A recipient contract can burn all of this, but the cost is bounded by this limit and is paid
+    ///      from the plan's fee reserve.
+    uint256 public constant PAYMENT_GAS_LIMIT = 800_000;
     /// @dev A schedule must expire strictly after the current consensus second.
     uint256 public constant MIN_LEAD_SECONDS = 5;
     uint256 public constant CAPACITY_PROBES = 4;

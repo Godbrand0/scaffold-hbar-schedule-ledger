@@ -137,7 +137,7 @@ and [Rust](https://rustup.rs) (only for the indexer).
 npm create scaffold-hbar@latest -- --template Godbrand0/scaffold-hbar-schedule-ledger my-app
 cd my-app
 
-yarn foundry:test                    # 47 contract tests, offline, mock Schedule Service and oracle
+yarn foundry:test                    # 50 contract tests, offline, mock Schedule Service and oracle
 yarn foundry:account:generate        # create a deployer keystore
 # fund the printed address at https://portal.hedera.com/faucet
 yarn foundry:deploy:testnet          # deploys RecurringPayments, regenerates the frontend ABI
@@ -207,7 +207,7 @@ The data is as fresh as the mirror node (a few seconds behind consensus) plus th
 
 | Command                | What it runs                                                        | Needs network |
 | ---------------------- | ------------------------------------------------------------------- | ------------- |
-| `yarn foundry:test`    | 47 Forge tests incl. fuzz tests on escrow accounting and the USD payout cap | no     |
+| `yarn foundry:test`    | 50 Forge tests incl. fuzz tests on escrow accounting and the USD payout cap | no     |
 | `yarn indexer:test`    | 18 unit tests and 16 end-to-end tests against a fake mirror node     | no            |
 | `yarn next:test`       | 16 tests for HBAR/USD unit conversion and attention logic            | no            |
 | `yarn test`            | all of the above                                                    | no            |
@@ -228,11 +228,17 @@ not have found them.
 - **The contract pays its own scheduled calls** *(measured)*. The schedule's payer is the scheduling contract. With
   too little balance the schedule still fires, fails with `INSUFFICIENT_PAYER_BALANCE`, and charges a fee anyway.
   The contract emits nothing in that case, so only the indexer's mirror node lookup reveals it. Fund a reserve per
-  run; the dashboard suggests 1.7 HBAR, which covers `RUN_GAS_LIMIT` (2M) × the testnet gas price (83 tinybar).
+  run; the dashboard suggests 2.3 HBAR, which covers `RUN_GAS_LIMIT` (2.6M) × the testnet gas price (83 tinybar, about 2.16 HBAR).
   Check the current price with `cast gas-price` and adjust `SUGGESTED_FEE_RESERVE_HBAR`.
 - **Booking is expensive** *(measured)*. `createPlan`, `rebook` and `resume` each book a schedule, about 1.6M gas
   (roughly 1.3 HBAR at testnet prices). Send them with an explicit gas limit of at least 1.85M (the dashboard uses
   2M). The network also needs `value + gasLimit × gasPrice` available up front.
+- **Paying a brand-new address costs about 650k gas** *(measured)*. The first payment to an address with no account
+  makes Hedera create the account inside the transfer. A `call` with 100k gas failed, so a perfectly ordinary new
+  recipient paused the plan. Simulations failed at 100k, 200k, 400k and 600k gas and succeeded at 700k and 800k, and a
+  real transfer used 643,594 gas. `PAYMENT_GAS_LIMIT` is now 800k, and `RUN_GAS_LIMIT` is 2.6M so the payout plus
+  booking the next run (about 1.45M) still fits in one scheduled call. A greedy recipient contract can burn the whole
+  payout allowance, which costs at most 800k gas and comes out of the fee reserve.
 - **`block.timestamp` can trail the firing second** *(measured)*. HSS fired a run at consensus second `…226.03`
   while `block.timestamp` inside that call was earlier, so a strict "is it due?" check reverted the schedule's own
   call with `NotDue`. `executeRun` accepts runs up to `DUE_TOLERANCE_SECONDS` (10) early.
@@ -253,7 +259,7 @@ not have found them.
 
 > **Which build this covers.** These transactions were made against the build before USD plans and the Supra
 > oracle were added. The fixed-HBAR path they exercise (`createPlan`, `executeRun`, `resume`, `cancel`) is unchanged.
-> A live USD plan run has not been recorded yet, so USD plans are covered by the 47 contract tests and by checks of
+> A live USD plan run has not been recorded yet, so USD plans are covered by the 50 contract tests and by checks of
 > Supra's live testnet contract, not by a testnet execution.
 
 Deployed to Hedera testnet with `yarn foundry:deploy:testnet`; contract

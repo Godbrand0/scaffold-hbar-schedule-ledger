@@ -119,7 +119,7 @@ yarn next:dev
 ```
 
 Open http://localhost:3000, connect a wallet funded with testnet HBAR, and fill in the form. The defaults are sensible:
-the form suggests a 1.7 HBAR fee reserve per run, which covers the network's fee requirement at current testnet
+the form suggests a 2.3 HBAR fee reserve per run, which covers the network's fee requirement at current testnet
 prices.
 
 **Or from the command line:**
@@ -127,8 +127,8 @@ prices.
 ```bash
 cast send <contract-0x-address> \
   "createPlan(address,uint256,uint256,uint32,uint32)" \
-  <recipient-0x-address> 10000000 170000000 60 2 \
-  --value 3.6ether \
+  <recipient-0x-address> 10000000 230000000 60 2 \
+  --value 4.8ether \
   --rpc-url https://testnet.hashio.io/api \
   --account <your-keystore> --legacy --gas-limit 2000000
 ```
@@ -158,14 +158,14 @@ The argument is dollars with 8 decimals (`25000000` = $0.25). It returns the HBA
 ```bash
 cast send <contract-0x-address> \
   "createUsdPlan(address,uint256,uint256,uint256,uint32,uint32)(uint256)" \
-  <recipient-0x-address> 25000000 500000000 170000000 60 2 \
-  --value 13.4ether \
+  <recipient-0x-address> 25000000 500000000 230000000 60 2 \
+  --value 14.6ether \
   --rpc-url https://testnet.hashio.io/api \
   --account <your-keystore> --legacy --gas-limit 2000000
 ```
 
 Arguments: recipient, USD per run, **max HBAR per run (the escrowed cap)**, fee reserve per run, interval, runs.
-`--value` is `(cap + fee reserve) × runs`, here `(5 + 1.7) × 2 = 13.4` HBAR. Pick a cap with headroom, about twice
+`--value` is `(cap + fee reserve) × runs`, here `(5 + 2.3) × 2 = 14.6` HBAR. Pick a cap with headroom, about twice
 the quote, so a price drop does not push a run over it. A run that is over the cap, or whose price is stale or
 missing, pauses the plan instead of paying a wrong amount. What a run does not need stays yours:
 

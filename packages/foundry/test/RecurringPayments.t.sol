@@ -5,6 +5,7 @@ import { Test } from "forge-std/Test.sol";
 import { RecurringPayments } from "../contracts/RecurringPayments.sol";
 import { MockHederaScheduleService } from "./mocks/MockHederaScheduleService.sol";
 import { RejectingReceiver } from "./mocks/RejectingReceiver.sol";
+import { GasHungryReceiver } from "./mocks/GasHungryReceiver.sol";
 import { MockSupraStorage } from "./mocks/MockSupraStorage.sol";
 import { ISupraSValueFeed } from "../contracts/interfaces/ISupraSValueFeed.sol";
 
@@ -437,6 +438,36 @@ contract RecurringPaymentsTest is Test {
         vm.warp(target - ledger.DUE_TOLERANCE_SECONDS() - 1);
         vm.expectRevert(abi.encodeWithSelector(RecurringPayments.NotDue.selector, target));
         ledger.executeRun(id);
+    }
+
+    /// Regression for a failure seen on testnet: the first payment to an address with no account makes Hedera create
+    /// the account inside the transfer (about 650k gas). With a 100k payout limit that transfer failed and paused the
+    /// plan, although the recipient was a perfectly ordinary new address.
+    function test_executeRun_paysARecipientThatNeedsAboutAsMuchGasAsAccountCreation() public {
+        GasHungryReceiver newAccount = new GasHungryReceiver(650_000);
+        uint256 id = _createFor(payable(address(newAccount)));
+        vm.warp(ledger.getPlan(id).nextRunAt);
+
+        hss.fire(0);
+
+        assertEq(ledger.getPlan(id).completedRuns, 1);
+        assertEq(address(newAccount).balance, AMOUNT);
+    }
+
+    function test_executeRun_stillBoundsWhatARecipientCanBurn() public {
+        GasHungryReceiver greedy = new GasHungryReceiver(ledger.PAYMENT_GAS_LIMIT() + 10_000);
+        uint256 id = _createFor(payable(address(greedy)));
+        vm.warp(ledger.getPlan(id).nextRunAt);
+
+        hss.fire(0);
+
+        assertEq(uint8(_status(id)), uint8(RecurringPayments.Status.Paused));
+        assertEq(address(greedy).balance, 0);
+    }
+
+    function test_runGasLimit_leavesRoomForAccountCreationPlusBooking() public view {
+        // payout to a new account (~0.65M) + booking the next run (~1.45M) must fit in one scheduled call.
+        assertGe(ledger.RUN_GAS_LIMIT(), 650_000 + 1_450_000);
     }
 
     function test_executeRun_revertsOnUnknownPlan() public {

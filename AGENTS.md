@@ -56,6 +56,9 @@ Use `yarn`. Rust is only needed for `indexer:*`; without `cargo` those scripts w
   with a non-zero amount writes the "recipient rejected" message.
 - **The constructor needs Supra's storage address, pair and max age.** `deployCreate.js` passes them; tests use
   `MockSupraStorage`.
+- **The first payment to a new address needs ~650k gas** (Hedera creates the account in the transfer), so
+  `PAYMENT_GAS_LIMIT` is 800k and `RUN_GAS_LIMIT` 2.6M. Lowering either breaks payments to new recipients while
+  every test using an existing account still passes. The fee reserve must cover `RUN_GAS_LIMIT × gasPrice`.
 - **`block.timestamp` can be earlier than the second HSS fired at**, so the due check has
   `DUE_TOLERANCE_SECONDS`. Do not make it strict.
 - **Deploy with `yarn foundry:deploy:testnet`.** It uses `forge create` because `forge script` cannot fork Hashio.
